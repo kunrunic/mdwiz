@@ -204,14 +204,32 @@ def shell_run(
     prompt_patterns: list[str] | None = None,
     timeout_sec: int = 1800,
     tail_lines: int = 200,
+    inactivity_sec: int = 60,
 ) -> dict:
     """
     Run a shell command in a PTY. Combined stdout/stderr captured.
 
-    On prompt match (default patterns: Password/Passphrase/Username), if
-    MDWIZ_SOCKET is set, asks the user via tmux popup and writes the response
-    to the PTY's stdin so the command continues. Without socket, the command
-    is killed and the prompt is recorded.
+    Two ways the popup can fire:
+      1. Pattern match — `prompt_patterns` (default covers Password / Passphrase
+         / API Key / Token / Secret / Username for ...). Fast and exact.
+      2. Inactivity fallback — if the process produces no output for
+         `inactivity_sec` seconds AND is still alive, mdwiz assumes it is
+         blocked on stdin and pops the popup with the last output line as
+         context. Catches non-standard prompts ("Enter code:", etc.).
+         Set `inactivity_sec=0` to disable.
+
+    User in popup can either type the value (injected to PTY stdin) or cancel
+    (Ctrl+C) which kills the process.
+
+    Args:
+      cmd            : full command line (passed to bash -c).
+      cwd            : working directory (default: MDWIZ_ROOT).
+      env            : extra env vars (merged on top of os.environ).
+      prompt_patterns: extra regex patterns; defaults are added too.
+      timeout_sec    : hard kill after this many seconds (default 30 min).
+      tail_lines     : tail length to return (default 200).
+      inactivity_sec : seconds of silence before fallback popup fires
+                       (default 60; 0 = disabled).
 
     Returns:
       {exit_code, tail_log, prompts_seen, duration_sec, killed_for_prompt}
@@ -241,6 +259,7 @@ def shell_run(
     prompts_seen: list[str] = []
     killed = False
     exit_code: int | None = None
+    last_output_time = time.time()
 
     try:
         while True:
@@ -261,6 +280,7 @@ def shell_run(
                 except OSError:
                     chunk = b""
                 if chunk:
+                    last_output_time = time.time()
                     output.extend(chunk)
                     line_buf += chunk.decode("utf-8", errors="replace")
 
@@ -282,6 +302,7 @@ def shell_run(
                                 _log(f"sideband ok ({len(value)} chars) → PTY stdin")
                                 try:
                                     os.write(fd, (value + "\n").encode("utf-8"))
+                                    last_output_time = time.time()
                                 except OSError as e:
                                     _log(f"PTY write failed: {e}")
                                 line_buf = ""
@@ -293,6 +314,37 @@ def shell_run(
                             break
                     if killed:
                         break
+
+            # Inactivity fallback — 패턴 매칭 안 된 비표준 프롬프트도 잡기 위함.
+            # PTY 출력이 N초간 없고 프로세스 살아있으면 stdin 대기 가능성 → popup.
+            if (inactivity_sec > 0 and not killed and
+                    time.time() - last_output_time > inactivity_sec):
+                # 마지막 출력 라인을 hint 로
+                hint = line_buf.strip()
+                if not hint:
+                    text_so_far = output.decode("utf-8", errors="replace").splitlines()
+                    hint = text_so_far[-1].strip() if text_so_far else "(no output yet)"
+                prompt_text = f"[inactivity {inactivity_sec}s] {hint}"
+                prompts_seen.append(prompt_text)
+                _log(f"inactivity fallback fired — hint: {hint!r}")
+                value = _request_sideband_input(
+                    prompt_text, cmd,
+                    {"cwd": work_cwd, "exec": "shell_run", "reason": f"inactivity {inactivity_sec}s"},
+                )
+                if value is not None:
+                    _log(f"sideband ok ({len(value)} chars) → PTY stdin")
+                    try:
+                        os.write(fd, (value + "\n").encode("utf-8"))
+                    except OSError as e:
+                        _log(f"PTY write failed: {e}")
+                    last_output_time = time.time()  # reset
+                    line_buf = ""
+                else:
+                    _log("inactivity popup cancelled — killing")
+                    _kill_tree(pid)
+                    killed = True
+                if killed:
+                    break
 
             try:
                 wpid, status = os.waitpid(pid, os.WNOHANG)
