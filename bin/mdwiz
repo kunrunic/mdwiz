@@ -1,0 +1,458 @@
+#!/usr/bin/env bash
+# mdwiz — markdown-driven AI workflow runner (single entry point).
+#
+# usage:
+#   mdwiz                       # use cwd as project root
+#   mdwiz <dir>                 # use <dir> as project root
+#   mdwiz --list                # list all running mdwiz sessions
+#   mdwiz --kill                # kill session of current root (cwd)
+#   mdwiz --kill <label>        # kill specific session (label = "mdwiz-<name>" 또는 "<name>")
+#   mdwiz --kill --all          # kill ALL running mdwiz sessions (confirms first)
+#   mdwiz --doctor              # check dependencies
+#   mdwiz -h | --help
+#
+# How it works:
+#   1. Verifies deps (claude, tmux, python+mcp).
+#   2. Generates a runtime MCP config that points at the user's python +
+#      this repo's mdwiz-mcp.py with MDWIZ_ROOT etc. injected.
+#   3. Starts mdwiz-helper.py in background (sideband socket server).
+#   4. Creates a tmux session running `claude` cwd'd to the project root.
+#   5. Attaches the user to that session — claude TUI is native, no mirror.
+#   6. On detach / quit: kills helper + tmux session + cleans temp files.
+#
+# When mdwiz-mcp's shell_run hits a password prompt, it asks the helper which
+# pops up `tmux display-popup -E mdwiz-pwprompt.sh` to capture the value
+# without dropping it into chat history.
+#
+# Env (override CLI / defaults):
+#   MDWIZ_ROOT          project root (default: cwd or first positional arg)
+#   MDWIZ_WRITE_GLOBS   comma-separated globs (relative to root) writeable via
+#                       fs_write. EMPTY (default) = read-only.
+#                       e.g.  "manifests/*.yaml,scripts/*.sh"
+#   MDWIZ_READ_GLOBS    colon-separated extra read paths beyond the root subtree
+#   MDWIZ_TMUX_SESSION  tmux session name (default: mdwiz-<basename>)
+#   MDWIZ_PYTHON        python3 to use (default: $(which python3))
+#   MDWIZ_SYSTEM_PROMPT extra system prompt text appended after defaults
+
+set -uo pipefail
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+MDWIZ_HOME="$(cd "$DIR/.." && pwd)"
+
+# ---------------------------------------------------------------------------
+# arg parsing
+# ---------------------------------------------------------------------------
+
+ROOT_ARG=""
+SUBCMD=""
+KILL_TARGET=""   # 비어있으면 cwd 기반, "--all" 이면 전부, 그 외는 특정 라벨
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --kill|kill)
+      SUBCMD="kill"
+      shift
+      # optional next arg: <label> or --all (다른 -옵션이면 안 가져감)
+      if [ $# -gt 0 ]; then
+        case "$1" in
+          --all|all)  KILL_TARGET="--all"; shift ;;
+          --*)        ;;  # 다음 또 다른 옵션 — 안 가져감
+          *)          KILL_TARGET="$1"; shift ;;
+        esac
+      fi
+      ;;
+    --list|list)        SUBCMD="list"; shift ;;
+    --doctor|doctor)    SUBCMD="doctor"; shift ;;
+    -h|--help|help)     SUBCMD="help"; shift ;;
+    -*)                 echo "✗ unknown option: $1" >&2; exit 1 ;;
+    *)
+      if [ -z "$ROOT_ARG" ]; then
+        ROOT_ARG="$1"
+      else
+        echo "✗ extra positional arg: $1" >&2; exit 1
+      fi
+      shift
+      ;;
+  esac
+done
+
+# ---------------------------------------------------------------------------
+# resolve root
+# ---------------------------------------------------------------------------
+
+ROOT="${MDWIZ_ROOT:-${ROOT_ARG:-$(pwd)}}"
+[ -d "$ROOT" ] || { echo "✗ root not a directory: $ROOT" >&2; exit 1; }
+ROOT="$(cd "$ROOT" && pwd)"
+
+SESSION="${MDWIZ_TMUX_SESSION:-mdwiz-$(basename "$ROOT")}"
+SOCKET="/tmp/mdwiz-sock-${USER}-${SESSION}.sock"
+HELPER_PIDFILE="/tmp/mdwiz-helper-${USER}-${SESSION}.pid"
+HELPER_LOG="/tmp/mdwiz-helper-${USER}-${SESSION}.log"
+
+# ---------------------------------------------------------------------------
+# subcommands
+# ---------------------------------------------------------------------------
+
+cmd_help() {
+  sed -n '2,32p' "$0"
+}
+
+cmd_doctor() {
+  local rc=0
+  echo "mdwiz doctor — checking dependencies"
+  for c in tmux claude; do
+    if command -v "$c" >/dev/null; then
+      printf "  ✓ %-8s %s\n" "$c" "$(command -v "$c")"
+    else
+      printf "  ✗ %-8s MISSING\n" "$c"; rc=1
+    fi
+  done
+  local py="${MDWIZ_PYTHON:-$(command -v python3 || echo)}"
+  if [ -x "$py" ]; then
+    printf "  ✓ %-8s %s\n" "python3" "$py"
+    if "$py" -c "import mcp" 2>/dev/null; then
+      printf "  ✓ %-8s mcp module importable\n" "python3"
+    else
+      printf "  ✗ %-8s mcp module MISSING — run: %s -m pip install -r %s/requirements.txt\n" \
+        "python3" "$py" "$MDWIZ_HOME"
+      rc=1
+    fi
+  else
+    printf "  ✗ %-8s MISSING\n" "python3"; rc=1
+  fi
+  printf "\n  root    : %s\n" "$ROOT"
+  printf "  session : %s\n" "$SESSION"
+  printf "  socket  : %s\n" "$SOCKET"
+  return $rc
+}
+
+# ---- kill helpers --------------------------------------------------------
+
+# 단일 세션 정리 — tmux + helper pid + socket 파일
+_kill_one() {
+  local ses="$1"
+  if tmux has-session -t "$ses" 2>/dev/null; then
+    tmux kill-session -t "$ses" 2>/dev/null
+    echo "  ✓ tmux killed: $ses"
+  else
+    echo "  · tmux session 없음: $ses"
+  fi
+  local pidfile="/tmp/mdwiz-helper-${USER}-${ses}.pid"
+  local sock="/tmp/mdwiz-sock-${USER}-${ses}.sock"
+  if [ -f "$pidfile" ]; then
+    local pid; pid=$(cat "$pidfile" 2>/dev/null || echo "")
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      echo "  ✓ helper killed (pid=$pid)"
+    fi
+    rm -f "$pidfile"
+  fi
+  rm -f "$sock"
+}
+
+# 모든 mdwiz-* 세션 이름 출력 (없으면 빈 출력)
+_list_sessions() {
+  tmux list-sessions -F "#{session_name}" 2>/dev/null | grep '^mdwiz-' || true
+}
+
+cmd_list() {
+  local sessions; sessions=$(_list_sessions)
+  if [ -z "$sessions" ]; then
+    echo "(떠있는 mdwiz 세션 없음)"
+    return 0
+  fi
+  printf "%-40s  %-50s  %s\n" "SESSION" "ROOT" "STARTED"
+  printf "%-40s  %-50s  %s\n" "----------------------------------------" "--------------------------------------------------" "-------------------"
+  while IFS= read -r ses; do
+    [ -z "$ses" ] && continue
+    local root started
+    # tmux session-environment 에 MDWIZ_ROOT 가 set 되어 있으면 거기서 → 못 찾으면 ?
+    root=$(tmux show-environment -t "$ses" MDWIZ_ROOT 2>/dev/null | sed 's/^MDWIZ_ROOT=//' | head -1)
+    [ -z "$root" ] && root="?"
+    # session_created 는 epoch 초
+    local epoch; epoch=$(tmux display-message -t "$ses" -p '#{session_created}' 2>/dev/null)
+    if [ -n "$epoch" ]; then
+      started=$(date -r "$epoch" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "?")
+    else
+      started="?"
+    fi
+    printf "%-40s  %-50s  %s\n" "$ses" "$root" "$started"
+  done <<< "$sessions"
+}
+
+cmd_kill() {
+  # 케이스 1: --all
+  if [ "$KILL_TARGET" = "--all" ]; then
+    local sessions; sessions=$(_list_sessions)
+    if [ -z "$sessions" ]; then
+      echo "(떠있는 mdwiz 세션 없음)"
+      return 0
+    fi
+    echo "다음 세션을 모두 정리합니다:"
+    echo "$sessions" | sed 's/^/  - /'
+    printf "계속하시겠습니까? [y/N] "
+    read -r yn
+    case "$yn" in
+      [Yy]*) ;;
+      *) echo "취소됨"; return 1 ;;
+    esac
+    while IFS= read -r ses; do
+      [ -z "$ses" ] && continue
+      _kill_one "$ses"
+    done <<< "$sessions"
+    return 0
+  fi
+
+  # 케이스 2: 라벨 명시 (--kill <label>)
+  if [ -n "$KILL_TARGET" ]; then
+    local ses="$KILL_TARGET"
+    [[ "$ses" == mdwiz-* ]] || ses="mdwiz-$ses"
+    _kill_one "$ses"
+    return 0
+  fi
+
+  # 케이스 3: 인자 없음 — 현재 cwd 의 세션 (backward compat)
+  _kill_one "$SESSION"
+}
+
+case "$SUBCMD" in
+  help)   cmd_help; exit 0 ;;
+  doctor) cmd_doctor; exit $? ;;
+  kill)   cmd_kill; exit $? ;;
+  list)   cmd_list; exit $? ;;
+esac
+
+# ---------------------------------------------------------------------------
+# dep guard
+# ---------------------------------------------------------------------------
+
+cmd_doctor >/dev/null || { cmd_doctor; exit 1; }
+
+PY="${MDWIZ_PYTHON:-$(command -v python3)}"
+
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+  echo "✗ tmux session already exists: $SESSION" >&2
+  echo "  attach? (tmux attach -t $SESSION)  or  kill?  ($0 --kill)" >&2
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# generate runtime MCP config
+# ---------------------------------------------------------------------------
+
+MCP_CFG=$(mktemp -t "mdwiz-mcp-cfg-XXXXXX").json
+
+# build env block from variables (only set what's defined)
+read_globs="${MDWIZ_READ_GLOBS:-}"
+write_globs="${MDWIZ_WRITE_GLOBS:-}"
+
+cat > "$MCP_CFG" <<EOF
+{
+  "mcpServers": {
+    "mdwiz": {
+      "command": "$PY",
+      "args": ["$DIR/mdwiz-mcp.py"],
+      "env": {
+        "MDWIZ_ROOT": "$ROOT",
+        "MDWIZ_READ_GLOBS": "$read_globs",
+        "MDWIZ_WRITE_GLOBS": "$write_globs",
+        "MDWIZ_SOCKET": "$SOCKET"
+      }
+    }
+  }
+}
+EOF
+
+# ---------------------------------------------------------------------------
+# cleanup trap (final definition installed after all tmpfiles are known)
+# ---------------------------------------------------------------------------
+
+HELPER_PID=""
+SYS_TMP=""
+INIT_TMP=""
+WRAPPER=""
+
+# 터미널 상태 복구 — tmux/claude 가 alt-screen, mouse tracking, hidden cursor,
+# 색속성 등을 켰다가 비정상 빠지면 외부 셸이 그 상태로 남아 폰트/입력이 망가짐.
+# 다음 시퀀스로 모두 명시적으로 OFF.
+restore_terminal() {
+  # 1000/1001/1002/1003 = mouse tracking modes, 1006 = SGR ext mouse,
+  # 1015 = urxvt mouse, 1049 = alt-screen, 25 = cursor visible, 0m = SGR reset,
+  # 7h = autowrap on
+  printf '\e[?1000l\e[?1001l\e[?1002l\e[?1003l\e[?1006l\e[?1015l\e[?1049l\e[?25h\e[0m\e[?7h' 2>/dev/null
+  stty sane 2>/dev/null || true
+}
+
+cleanup() {
+  if [ -n "$HELPER_PID" ] && kill -0 "$HELPER_PID" 2>/dev/null; then
+    kill "$HELPER_PID" 2>/dev/null || true
+  fi
+  rm -f "$HELPER_PIDFILE" "$SOCKET" "$MCP_CFG" "$SYS_TMP" "$INIT_TMP" "$WRAPPER"
+  if tmux has-session -t "$SESSION" 2>/dev/null; then
+    tmux kill-session -t "$SESSION" 2>/dev/null || true
+  fi
+  restore_terminal
+}
+trap cleanup EXIT INT TERM
+
+# ---------------------------------------------------------------------------
+# start helper
+# ---------------------------------------------------------------------------
+
+"$PY" "$DIR/mdwiz-helper.py" --socket "$SOCKET" --session "$SESSION" \
+  >"$HELPER_LOG" 2>&1 &
+HELPER_PID=$!
+echo "$HELPER_PID" > "$HELPER_PIDFILE"
+
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [ -S "$SOCKET" ] && break
+  sleep 0.1
+done
+if [ ! -S "$SOCKET" ]; then
+  echo "✗ mdwiz-helper failed to bind socket — see $HELPER_LOG" >&2
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# build system prompt — baseline file + optional override
+# ---------------------------------------------------------------------------
+
+SYS_BASE_FILE="$DIR/mdwiz-system.md"
+[ -f "$SYS_BASE_FILE" ] || { echo "✗ missing: $SYS_BASE_FILE" >&2; exit 1; }
+
+# user-supplied extra appended at the end (env var)
+SYS_EXTRA="${MDWIZ_SYSTEM_PROMPT:-}"
+
+# ---------------------------------------------------------------------------
+# detect project's WIZARD.md and craft initial user message
+# ---------------------------------------------------------------------------
+
+GUIDE="${MDWIZ_GUIDE:-$ROOT/WIZARD.md}"
+
+if [ -f "$GUIDE" ]; then
+  GUIDE_REL="${GUIDE#$ROOT/}"
+  INITIAL_MSG="이 프로젝트(\`$ROOT\`)에는 \`$GUIDE_REL\` 가이드가 있습니다.
+
+지금 \`fs_read('$GUIDE_REL')\` 로 그 파일을 읽고, 한국어로 다음을 한 화면 분량으로 요약해 주세요:
+  1. 이 프로젝트에서 mdwiz 로 할 수 있는 작업의 종류 (예: 설치 / 빌드 / 진단 / 배포 / ...)
+  2. 작업을 시작하려면 사용자에게 어떤 정보가 필요한지
+
+그 다음 \"무엇을 도와드릴까요?\" 로 사용자의 다음 입력을 기다리세요."
+else
+  INITIAL_MSG="이 프로젝트(\`$ROOT\`)에는 아직 \`WIZARD.md\` 가이드가 없습니다.
+
+## WIZARD.md 가 뭔가요?
+
+이 프로젝트에서 mdwiz 로 **자주 할 작업의 절차** (예: 설치, 빌드, 배포, 진단 등) 를 정리한 한국어 markdown 파일입니다. 한 번 만들어 두면 다음 mdwiz 실행 때마다 claude 가 자동 로드해서, 사용자가 \"X 해줘\" 라고만 하면 그 절차대로 진행합니다 (매번 처음부터 설명할 필요 없음).
+
+## mdwiz 사용법 짧게
+
+당신이 가진 도구:
+  - \`shell_run(cmd)\` — 셸 명령 실행 (비번이 필요하면 자동으로 popup 떠서 사용자 입력)
+  - \`fs_read(path)\` / \`fs_write(path, content)\` — 파일 read / write (write 는 화이트리스트 안에서만)
+  - \`progress(stage, ...)\` — 진행 단계 알림
+
+비번은 chat 으로 묻지 말고 그냥 \`shell_run\` 호출 (popup 자동).
+
+## 두 가지 중 선택해주세요
+
+다음 표를 한국어로 사용자에게 보이고 1, 2 중 어느 쪽으로 갈지 물어보세요:
+
+| # | 선택 | 동작 | 결과 |
+|---|---|---|---|
+| 1 | **WIZARD.md 만들기** | 이 프로젝트의 기존 문서들 (\`fs_read('.')\` 로 root 목록 보고 \`README*\`, \`CLAUDE*\`, 다른 \`*.md\` 등 훑기) 을 읽어서 \"이 프로젝트에서 자주 할 작업의 절차\" 초안을 markdown 으로 제안 → 사용자 confirm → \`fs_write('WIZARD.md', ...)\` 로 저장 | 다음 mdwiz 부터 그 가이드 자동 로드 |
+| 2 | **그냥 시작** | WIZARD.md 안 만들고 자유 대화로 진행 | 매번 사용자가 무엇을 할지 처음부터 설명 |
+
+특정 파일명을 미리 가정하지 마세요 — 이 프로젝트에 어떤 문서들이 있는지는 \`fs_read('.')\` 로 root 디렉터리 목록부터 확인하세요."
+fi
+
+# ---------------------------------------------------------------------------
+# create tmux session running claude
+# ---------------------------------------------------------------------------
+#
+# The initial user message is passed as the positional arg to `claude` so the
+# session opens with claude already engaging — like bugreporter.sh does.
+# Both the system prompt and the initial message can contain newlines and
+# Korean, so we put them in temp files and let bash read them back inside
+# the tmux command line via `$(cat ...)`.
+
+SYS_TMP=$(mktemp -t "mdwiz-sys-XXXXXX").txt
+{
+  cat "$SYS_BASE_FILE"
+  if [ -n "$SYS_EXTRA" ]; then
+    printf "\n\n## 추가 (project)\n\n%s\n" "$SYS_EXTRA"
+  fi
+} > "$SYS_TMP"
+
+INIT_TMP=$(mktemp -t "mdwiz-init-XXXXXX").txt
+printf "%s" "$INITIAL_MSG" > "$INIT_TMP"
+
+# Wrapper 스크립트로 claude 실행 — bash -c "..." 안에서 인자 두 개를 따옴표
+# escape 로 분리하면 quoting 이 꼬여 system prompt 와 첫 user 메시지가 한
+# 인자로 합쳐지는 버그가 발생함 (ps 로 확인). wrapper 안에서는 평범한
+# bash 인용 규칙이 그대로 동작해서 안전.
+WRAPPER=$(mktemp -t "mdwiz-wrap-XXXXXX").sh
+cat > "$WRAPPER" <<EOF
+#!/bin/bash
+cd "$ROOT" || exit 1
+export MDWIZ_ROOT="$ROOT"
+export MDWIZ_SOCKET="$SOCKET"
+exec claude \\
+  --mcp-config "$MCP_CFG" \\
+  --append-system-prompt "\$(cat '$SYS_TMP')" \\
+  "\$(cat '$INIT_TMP')"
+EOF
+chmod +x "$WRAPPER"
+
+# 스크롤백은 터미널 (iTerm2/Terminal/...) 의 native 스크롤이 가장 자연스럽고
+# 모드 전환 없이 동작하므로 tmux mouse / wheel binding 은 두지 않음.
+# 사용자가 트랙패드/휠 그대로 → 터미널 native scrollback (모든 history 보존).
+#
+# tmux 자체의 history-limit 은 defensive 로 크게 잡아두고
+# (capture-pane -S -1000 같은 디버깅 가능), copy-mode 가 필요하면
+# Ctrl+B [ 로 진입 (mode-keys vi 라 vi 키 동작) → q 로 빠짐.
+#
+# extended-keys + terminal-features 의 *:extkeys 는 Shift+Enter / Ctrl+Arrow
+# 같은 modifyOtherKeys 시퀀스를 tmux 가 안 가로채고 claude 에 그대로 전달.
+tmux set-option -g  history-limit 50000 2>/dev/null || true
+tmux set-option -s  extended-keys on 2>/dev/null || true
+tmux set-option -as terminal-features "*:extkeys" 2>/dev/null || true
+
+tmux new-session -d -s "$SESSION" -x 200 -y 50 "$WRAPPER"
+tmux set-window-option -t "$SESSION" mode-keys vi 2>/dev/null || true
+# `mdwiz --list` 가 root 경로를 알 수 있게 session-environment 에 등록
+tmux set-environment -t "$SESSION" MDWIZ_ROOT "$ROOT" 2>/dev/null || true
+
+if [ -f "$GUIDE" ]; then
+  guide_status="✓ ${GUIDE#$ROOT/}"
+else
+  guide_status="(없음 — claude 가 첫 메시지에서 만들지 묻습니다)"
+fi
+
+# attach 직전 한 줄 — 자세한 배너는 attach 종료 후
+echo
+echo "▶ mdwiz: $SESSION  ($ROOT)"
+echo "  종료: claude /exit  /  detach: Ctrl+B d  /  스크롤: 터미널 트랙패드·휠 그대로"
+echo
+
+sleep 0.5
+tmux attach -t "$SESSION"
+exit_rc=$?
+
+# attach 가 끝난 즉시 터미널 상태 복구 — claude/tmux 가 안 풀어준 mouse/alt-screen/cursor 등을 강제로 OFF
+restore_terminal
+
+# 배너는 normal-screen 복구 후 그려야 깨끗
+cat <<EOF
+
+[mdwiz session ended]
+  root    : $ROOT
+  session : $SESSION
+  guide   : $guide_status
+  write   : ${write_globs:-(none)}
+  helper log : $HELPER_LOG
+
+  살아있는 세션이 있다면 정리:
+    $0 --kill    (또는: tmux kill-session -t $SESSION)
+
+EOF

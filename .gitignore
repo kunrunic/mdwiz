@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Editor
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# mdwiz runtime
+/tmp/mdwiz-*
+
+# Demo logs (created by demo-project)
+/tmp/mdwiz-demo-*
