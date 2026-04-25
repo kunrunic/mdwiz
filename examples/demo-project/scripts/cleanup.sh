@@ -3,8 +3,9 @@
 set -uo pipefail
 
 echo "── cleanup ──"
+shopt -s nullglob
 files=(/tmp/mdwiz-demo-*)
-if [ ! -e "${files[0]}" ]; then
+if [ ${#files[@]} -eq 0 ]; then
   echo "  (정리할 파일 없음)"
   exit 0
 fi

@@ -13,6 +13,18 @@ LOG="/tmp/mdwiz-demo-deploy-${ENV}.log"
 log() { printf '[%s] %s\n' "$ENV" "$*" | tee -a "$LOG"; }
 
 log "배포 시작"
+
+# 라이센스 등록 선행 요구 — 의도적으로 WIZARD.md 본문에 적시 안 함.
+# 첫 실행 시 사용자가 이 메시지를 보고 "deploy 전에 register 가 필요" 라는 사실을
+# 알게 되고, claude 에게 WIZARD.md 본문 갱신을 시킬 수 있도록 함 (workflow 학습 demo).
+LIC_FILE="/tmp/mdwiz-demo-license-${ENV}.txt"
+if [ ! -f "$LIC_FILE" ]; then
+  log "ERROR: 라이센스 미등록"
+  log "       먼저 'register' 를 실행해야 합니다 — bash scripts/register.sh $ENV"
+  exit 1
+fi
+log "라이센스 확인됨 ($LIC_FILE)"
+
 log "이미지 fetch 시뮬"
 sleep 0.7
 log "이미지 fetch 완료 (가상)"

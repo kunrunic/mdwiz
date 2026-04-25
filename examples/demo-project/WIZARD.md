@@ -18,10 +18,17 @@ mdwiz:
 
 | 작업 | 명령 | 비번 | 설명 |
 |---|---|---|---|
-| `check`   | `bash scripts/check.sh`            | X | 환경 의존성 점검 (bash, python3, tmux) |
-| `deploy`  | `bash scripts/deploy.sh <env>`     | O | 가상 배포 — env 별 정책 다름 (아래 표) |
-| `status`  | `bash scripts/status.sh <env>`     | X | 가상 서비스 상태 조회 |
-| `cleanup` | `bash scripts/cleanup.sh`          | X | 데모가 남긴 `/tmp/mdwiz-demo-*` 정리 |
+| `check`    | `bash scripts/check.sh`            | X | 환경 의존성 점검 (bash, python3, tmux) |
+| `register` | `bash scripts/register.sh <env>`   | O | 가상 라이센스 등록 (`License Key:` prompt — default 매칭 X) |
+| `deploy`   | `bash scripts/deploy.sh <env>`     | O | 가상 배포 — env 별 정책 다름 (아래 표) |
+| `status`   | `bash scripts/status.sh <env>`     | X | 가상 서비스 상태 조회 |
+| `cleanup`  | `bash scripts/cleanup.sh`          | X | 데모가 남긴 `/tmp/mdwiz-demo-*` 정리 |
+
+> **데모 학습 단계 (의도적으로 미완성으로 둔 부분)**
+> - frontmatter 의 `prompts` 에 `License Key:` 가 **빠져 있다**. `register` 첫 실행 때 mdwiz inactivity fallback (60초) 로 popup 됨 → 그 직후 claude 가 사용자에게 "frontmatter 에 추가할까요?" 제안 → 추가 후 다음번부턴 즉시.
+> - `deploy` 가 `register` 를 선행 요구한다는 사실이 본문에 **명시 안 되어 있다**. 첫 `deploy` 실행 시 라이센스 미등록 에러 → claude 가 "이 의존을 본문에 추가할까요?" 제안 → 추가.
+>
+> 이 두 단계가 mdwiz 의 lint→고도화 사이클을 직접 체험하는 부분.
 
 ### deploy 의 env 별 정책 (가상)
 
