@@ -19,9 +19,17 @@ mdwiz:
 | 작업 | 명령 | 비번 | 설명 |
 |---|---|---|---|
 | `check`   | `bash scripts/check.sh`            | X | 환경 의존성 점검 (bash, python3, tmux) |
-| `deploy`  | `bash scripts/deploy.sh <env>`     | O | 가상 배포 — `API Key:` popup 트리거 |
+| `deploy`  | `bash scripts/deploy.sh <env>`     | O | 가상 배포 — env 별 정책 다름 (아래 표) |
 | `status`  | `bash scripts/status.sh <env>`     | X | 가상 서비스 상태 조회 |
 | `cleanup` | `bash scripts/cleanup.sh`          | X | 데모가 남긴 `/tmp/mdwiz-demo-*` 정리 |
+
+### deploy 의 env 별 정책 (가상)
+
+| env | API Key 최소 길이 | 재시도 | 추가 step | 데모 의도 |
+|---|---|---|---|---|
+| `dev`     | 1자 (loose)  | 1회 | — | 빠른 로컬 테스트 — popup 한 번만 |
+| `staging` | 8자          | 3회 | — | 일반적 secret 입력 + 재시도 popup |
+| `prod`    | 16자         | 3회 | `Type CONFIRM-PROD to proceed:` | 비표준 prompt → **mdwiz inactivity fallback** 시연 (default 패턴에 안 잡혀서 60s 후 popup) |
 
 ## 워크플로우
 

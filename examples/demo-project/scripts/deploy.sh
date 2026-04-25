@@ -19,10 +19,15 @@ log "이미지 fetch 완료 (가상)"
 
 log "인증 필요 — API Key 요청"
 
-# 가상의 검증 — 실전 느낌 살리기 위해 최소 길이 8자 + 3회 재시도.
-MIN_KEY_LEN=8
+# 환경별 정책 (가상)
+case "$ENV" in
+  dev)      MIN_KEY_LEN=1  ; MAX_ATTEMPT=1 ; CONFIRM_PROD=0 ;;  # loose
+  staging)  MIN_KEY_LEN=8  ; MAX_ATTEMPT=3 ; CONFIRM_PROD=0 ;;  # 일반 secret
+  prod)     MIN_KEY_LEN=16 ; MAX_ATTEMPT=3 ; CONFIRM_PROD=1 ;;  # 엄격 + 최종 confirm
+esac
+log "  policy: min_key_len=${MIN_KEY_LEN} max_attempt=${MAX_ATTEMPT} confirm_prod=${CONFIRM_PROD}"
+
 attempt=0
-MAX_ATTEMPT=3
 while : ; do
   attempt=$((attempt + 1))
   if [ "$attempt" -eq 1 ]; then
@@ -44,6 +49,19 @@ while : ; do
 done
 
 log "인증 성공 (key length=${#API_KEY})"
+
+# prod 에선 한 단계 더 — 비표준 prompt 라 default 패턴 매칭 안 됨.
+# mdwiz 의 inactivity fallback (60초) 으로 잡힌다.
+if [ "$CONFIRM_PROD" = "1" ]; then
+  log "PROD 확정 입력 필요"
+  printf 'Type CONFIRM-PROD to proceed: '
+  read -r CONFIRM
+  if [ "$CONFIRM" != "CONFIRM-PROD" ]; then
+    log "ERROR: PROD 확정 실패 (입력: '${CONFIRM}')"
+    exit 1
+  fi
+  log "PROD 확정 완료"
+fi
 sleep 0.4
 
 log "롤아웃 시뮬 (3 단계)"
