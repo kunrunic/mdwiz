@@ -187,6 +187,22 @@ mdwiz --list                       # 떠있는 세션 확인
 | 비번 popup | 로컬 — `mdwiz-helper.py` ↔ `mdwiz-pwprompt.py` (둘 다 로컬) |
 | 비번 값의 이동 경로 | popup → unix socket → mdwiz-mcp → PTY stdin (절대 chat 경유 X) |
 
+## 변형 — WIZARD.md 가 없는 상태부터 (생성 플로우)
+
+위 시나리오들은 `WIZARD.md` **가 이미 있는** 상태에서의 동작이었다. mdwiz 의 또 다른 핵심 진입점인 **"WIZARD.md 자동 생성"** 플로우는 `examples/demo-project-bare/` 에서 체험할 수 있다 — 이 디렉터리는 `README.md` + `scripts/*.sh` 만 있고 `WIZARD.md` 가 일부러 없다.
+
+```bash
+cd /path/to/mdwiz/examples/demo-project-bare
+mdwiz
+```
+
+mdwiz 가 첫 인사로 *"가이드가 없습니다 — 1번: 만들기 / 2번: 그냥 시작"* 분기를 띄운다.
+
+- **1번 선택** → claude 가 `fs_read('.')` 로 root 목록 → `README.md` + `scripts/*.sh` 를 훑음 → "이 프로젝트에서 자주 할 작업 (build / preview / publish / clean)" 초안 markdown 을 chat 에 미리보기로 제안 → 사용자 confirm → `fs_write('WIZARD.md', ...)` 로 저장. 다음 mdwiz 부터 자동 로드.
+- **2번 선택** → 가이드 없이 자유 대화로 진행. 나중에 *"이제 WIZARD.md 만들어줘"* 라고 시켜도 된다.
+
+생성된 직후 곧바로 `> dev 환경에 publish 해줘` 같은 자연어 명령으로 위와 동일한 popup / inactivity fallback / frontmatter 진화 사이클을 그대로 체험할 수 있다.
+
 ## 다음 단계 — 자기 프로젝트로
 
-이 데모가 익숙해졌으면 자기 프로젝트의 root 에 `WIZARD.md` 를 만들어 `cd <project> && mdwiz` 한 번 띄우면 된다. claude 가 첫 메시지에서 워크플로우 요약 → 자유 대화로 진행. 필요하면 `MDWIZ_WRITE_GLOBS` 로 fs_write 화이트리스트도 지정.
+이 데모가 익숙해졌으면 자기 프로젝트 root 에서 그냥 `cd <project> && mdwiz` 한 번 띄우면 된다. `WIZARD.md` 가 없으면 위 변형 시나리오 그대로 — claude 가 기존 `README*` / `CLAUDE*` / 기타 `*.md` 들을 훑어 초안을 제안한다. confirm 후 저장하면 다음부터는 그 가이드가 자동 로드된다. 필요하면 `MDWIZ_WRITE_GLOBS` 로 fs_write 화이트리스트도 지정.

@@ -18,6 +18,21 @@
 - 당신이 chat 에 "비번 알려주세요" 같이 묻지 **마세요** — 사용자 경험상 중복이고, popup 이 더 안전합니다 (chat history 에 안 남음).
 - 사용자에게 자유 텍스트 정보가 필요하면 (예: "어느 install-root 에 깔까요?") 그건 chat 으로 물어도 됩니다 — 비밀이 아닌 답변용.
 
+## `AskUserQuestion` 사용 금지 (전역)
+
+claude code 내장 도구 `AskUserQuestion` 은 **절대 호출하지 마세요**. 이유:
+
+- 이 도구는 alt-screen TUI 모델을 전제로 화면 하단에 picker overlay 를 그립니다.
+- mdwiz 는 사용자의 트랙패드 native scrollback 을 살리기 위해 main-screen 모드로 동작하므로, picker 가 chat 영역으로 reflow 되지 않고 이미 출력된 줄 위를 그대로 덮어버립니다 (시각적으로 깨짐).
+
+대신 사용자에게 객관식/선택지를 물을 때:
+
+- **markdown 표 또는 번호 리스트로 chat 에 보이고 "1, 2 중 골라주세요" 라고 답을 받으세요.** 사용자는 번호 또는 텍스트로 답합니다.
+- 자유 입력은 그냥 chat 으로 묻기.
+- 비밀스러운 입력 (비번, 토큰 등) 은 `shell_run` (자동 popup) 으로 처리.
+
+(향후 mdwiz 가 자체 popup 기반 `ask_user` MCP 도구를 제공하게 되면 그쪽으로 이전. 그때 이 절은 갱신.)
+
 ## 작업 패턴
 
 1. **계획부터** — 큰 작업은 항상 표 형식으로 계획 먼저 보여주고 사용자 confirm 받기. 표 형식 권장:
