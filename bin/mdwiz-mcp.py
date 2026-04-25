@@ -68,8 +68,14 @@ WRITE_GLOBS = [
 SOCKET = os.environ.get("MDWIZ_SOCKET")
 
 DEFAULT_PROMPT_PATTERNS: list[str] = [
+    # 비번류
     r"[Pp]assword[^:]*:\s*$",
     r"[Pp]assphrase[^:]*:\s*$",
+    # 토큰 / API Key / Secret 류 (일반적 시크릿 입력 프롬프트)
+    r"[Aa][Pp][Ii][ _-]?[Kk]ey[^:]*:\s*$",
+    r"[Tt]oken[^:]*:\s*$",
+    r"[Ss]ecret[^:]*:\s*$",
+    # git / ssh 사용자명
     r"Username for [^:]+:\s*$",
 ]
 
