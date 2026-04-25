@@ -1,6 +1,18 @@
+---
+mdwiz:
+  prompts:
+    - "API Key:"
+  commands:
+    # deploy.sh 는 가상 스크립트라 빨리 끝나지만, 실전 배포라면 길게 잡는 예시
+    - match: "bash scripts/deploy.sh prod*"
+      inactivity_sec: 600
+      timeout_sec: 3600
+---
 # demo-project — mdwiz 워크플로우 가이드
 
 이 프로젝트는 mdwiz 의 동작을 보여주는 가상 데모다. 실제 외부 시스템 호출 없이 `echo` / `sleep` / `read` 로만 시뮬레이션한다.
+
+> 상단 frontmatter 의 `mdwiz:` 영역은 mdwiz 가 자동으로 읽는 설정. `prompts` 추가 → 1차 매칭 즉시. `commands` → cmd 별 inactivity/timeout 오버라이드.
 
 ## 자주 할 작업
 

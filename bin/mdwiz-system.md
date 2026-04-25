@@ -66,3 +66,34 @@ WIZARD.md 의 좋은 구조:
 - **각 작업 별 절차** (어떤 도구·명령·파일을 쓰는지)
 - **사용자에게 물어야 할 정보** (예: install-root, profile 이름)
 - **주의사항 / 의존성 / 위험한 step**
+
+### WIZARD.md frontmatter — mdwiz 설정 영역
+
+WIZARD.md 상단에 YAML frontmatter 로 **mdwiz 가 자동으로 읽는 설정** 을 둘 수 있습니다. 이게 있으면 패턴/타임아웃을 매번 인자로 안 줘도 되고, hang 위험이 줄어듭니다.
+
+```yaml
+---
+mdwiz:
+  prompts:                                   # default 패턴에 추가될 regex
+    - "API Key:"
+    - "License Key:"
+    - "[Cc]ode:"
+  commands:                                  # cmd 매칭 시 timing 오버라이드
+    - match: "bash scripts/deploy.sh prod*"  # fnmatch glob — full cmd 와 매치
+      inactivity_sec: 1800                   # 30분 — 길게
+      timeout_sec: 7200                      # 2시간 — 더 길게
+    - match: "bash scripts/build.sh*"
+      inactivity_sec: 600                    # 10분
+---
+# (WIZARD.md 본문은 여기서부터)
+```
+
+언제 이 영역을 작성/갱신해야 하는가:
+
+1. **WIZARD.md 처음 만들 때** — 프로젝트 스크립트들을 fs_read 로 훑으면서 `read -s VAR` 패턴 (어떤 prompt 가 뜰지) 을 발견하면 `prompts` 에 그 prompt 문자열을 추가. 길게 걸릴 명령이 보이면 `commands` 에도 추가.
+
+2. **inactivity 60초 popup 이 뜬 직후** — 사용자가 "이건 그냥 길게 걸리는 거야, 더 기다려" 라고 하면, **다시 묻지 않아도 되도록** 즉시 WIZARD.md frontmatter 의 `commands` 에 그 cmd glob 과 적절한 `inactivity_sec` 를 추가하고 `fs_write` 로 저장. 그 다음에 같은 명령 재실행. 다음번에는 자동 적용.
+
+3. **사용자가 "이런 prompt 도 자동 처리해" 라고 알려주면** — `prompts` 에 추가 + 저장.
+
+frontmatter 갱신은 `.md` 파일 쓰기지만 source-bytes 가 정확해야 하므로 (YAML 들여쓰기 민감) **code block (\`\`\`yaml ... \`\`\`) 으로 미리보기 보여주고 사용자 confirm 후 저장**. 본문은 평문 markdown 그대로 (위 §fs_write 미리보기 규칙).

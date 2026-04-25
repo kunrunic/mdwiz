@@ -44,6 +44,7 @@ import sys
 import time
 from pathlib import Path
 
+import yaml
 from mcp.server.fastmcp import FastMCP
 
 # ---------------------------------------------------------------------------
@@ -84,6 +85,57 @@ mcp = FastMCP("mdwiz")
 
 def _log(msg: str) -> None:
     print(f"[mdwiz-mcp] {msg}", file=sys.stderr, flush=True)
+
+
+# ---------------------------------------------------------------------------
+# WIZARD.md frontmatter — project-specific config
+# ---------------------------------------------------------------------------
+#
+# 프로젝트의 WIZARD.md 상단에 YAML frontmatter 로 mdwiz 설정을 둘 수 있다:
+#
+#   ---
+#   mdwiz:
+#     prompts:                                # default 패턴에 추가될 regex
+#       - "API Key:"
+#       - "[Cc]ode:"
+#     commands:                               # cmd 매칭 시 timing 오버라이드
+#       - match: "bash scripts/deploy.sh prod*"  # fnmatch glob against full cmd
+#         inactivity_sec: 1800
+#         timeout_sec: 7200
+#       - match: "bash scripts/build.sh*"
+#         inactivity_sec: 600
+#   ---
+#
+# - prompts: default + per-call prompt_patterns 와 함께 union
+# - commands: 첫 매치가 적용. 호출자가 명시 인자를 줬으면 그걸 우선.
+#
+# 매 shell_run 호출 시 새로 read — claude 가 mid-session 에 WIZARD.md 갱신해도
+# 다음 호출부터 즉시 반영.
+
+def _load_wizard_config() -> dict:
+    """WIZARD.md frontmatter 의 mdwiz: 섹션을 dict 로 반환. 없으면 {}."""
+    wp = ROOT / "WIZARD.md"
+    if not wp.exists():
+        return {}
+    try:
+        text = wp.read_text(encoding="utf-8", errors="replace")
+        m = re.match(r"^---\s*\n(.*?)\n---\s*(?:\n|$)", text, re.DOTALL)
+        if not m:
+            return {}
+        data = yaml.safe_load(m.group(1)) or {}
+        return data.get("mdwiz") or {}
+    except Exception as e:
+        _log(f"WIZARD.md frontmatter 파싱 실패: {e}")
+        return {}
+
+
+def _wizard_command_overrides(cmd: str, config: dict) -> dict:
+    """cmd 에 매치되는 첫 commands 항목 반환 ({} 가능)."""
+    for entry in (config.get("commands") or []):
+        glob = entry.get("match", "")
+        if glob and fnmatch.fnmatch(cmd, glob):
+            return entry
+    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -234,8 +286,22 @@ def shell_run(
     Returns:
       {exit_code, tail_log, prompts_seen, duration_sec, killed_for_prompt}
     """
-    pat_strings = list(DEFAULT_PROMPT_PATTERNS) + list(prompt_patterns or [])
+    # WIZARD.md frontmatter 의 prompts / commands 반영
+    wiz_cfg = _load_wizard_config()
+    wiz_prompts = wiz_cfg.get("prompts") or []
+    pat_strings = list(DEFAULT_PROMPT_PATTERNS) + list(wiz_prompts) + list(prompt_patterns or [])
     patterns = [re.compile(p) for p in pat_strings]
+
+    overrides = _wizard_command_overrides(cmd, wiz_cfg)
+    # 호출자가 default 값으로 두었을 때만 WIZARD.md 의 값을 적용 — explicit 인자 우선.
+    if overrides:
+        if timeout_sec == 1800 and "timeout_sec" in overrides:
+            timeout_sec = int(overrides["timeout_sec"])
+            _log(f"WIZARD.md override: timeout_sec={timeout_sec} (cmd matched '{overrides['match']}')")
+        if inactivity_sec == 60 and "inactivity_sec" in overrides:
+            inactivity_sec = int(overrides["inactivity_sec"])
+            _log(f"WIZARD.md override: inactivity_sec={inactivity_sec} (cmd matched '{overrides['match']}')")
+
     cmd_env = os.environ.copy()
     if env:
         cmd_env.update(env)
