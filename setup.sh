@@ -2,13 +2,15 @@
 # setup.sh — mdwiz 를 사용자 환경에 등록 (idempotent, sudo 불필요).
 #
 # 하는 일:
-#   1. Python `mcp` 패키지 확인 / 설치 (없으면 pip install)
+#   1. 프로젝트 디렉터리 안에 .venv 를 만들고 requirements.txt 설치
+#      (Homebrew/PEP 668 환경에서도 안전)
 #   2. 사용자 셸 rc 파일 감지 (zsh > bash > fish)
 #   3. rc 에 mdwiz/bin 을 PATH 에 추가 (이미 있으면 skip)
 #   4. 마지막에 `mdwiz --doctor` 실행해 결과 확인
 #
 # 사용:
-#   bash setup.sh                    # 기본 (현재 사용자만)
+#   bash setup.sh                    # 기본 (.venv 사용)
+#   bash setup.sh --no-venv          # venv 안 만들고 시스템 python 에 설치
 #   bash setup.sh --rc <path>        # rc 파일 직접 지정
 #   bash setup.sh --no-pip           # python 패키지 설치 건너뛰기
 #   bash setup.sh --system           # /usr/local/bin 에 symlink 생성 (sudo 필요)
@@ -18,18 +20,21 @@ set -uo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN_DIR="$DIR/bin"
+VENV_DIR="$DIR/.venv"
 MARKER_BEGIN="# mdwiz PATH (added by setup.sh)"
 
 NO_PIP=0
+NO_VENV=0
 SYSTEM=0
 RC=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-pip)   NO_PIP=1; shift ;;
+    --no-venv)  NO_VENV=1; shift ;;
     --system)   SYSTEM=1; shift ;;
     --rc)       RC="$2"; shift 2 ;;
-    -h|--help)  sed -n '2,18p' "$0"; exit 0 ;;
+    -h|--help)  sed -n '2,19p' "$0"; exit 0 ;;
     *)          echo "✗ unknown option: $1" >&2; exit 1 ;;
   esac
 done
@@ -40,7 +45,7 @@ done
 # 1. Python mcp 패키지
 # ---------------------------------------------------------------------------
 
-echo "[1/4] Python mcp 패키지 확인"
+echo "[1/4] Python 환경 준비"
 PY=$(command -v python3 || echo "")
 if [ -z "$PY" ]; then
   echo "  ✗ python3 없음 — Python 3.10+ 가 필요합니다" >&2
@@ -48,18 +53,40 @@ if [ -z "$PY" ]; then
 fi
 echo "  ✓ python3: $PY"
 
-if "$PY" -c "import mcp" 2>/dev/null; then
-  echo "  ✓ mcp 패키지 이미 설치됨"
+if [ "$NO_VENV" = "1" ]; then
+  TARGET_PY="$PY"
+  echo "  · --no-venv: 시스템 python 에 직접 설치합니다"
+else
+  if [ -x "$VENV_DIR/bin/python3" ]; then
+    echo "  ✓ venv 이미 존재: $VENV_DIR"
+  else
+    echo "  → venv 생성: $PY -m venv $VENV_DIR"
+    if ! "$PY" -m venv "$VENV_DIR"; then
+      echo "  ✗ venv 생성 실패" >&2
+      echo "    Linux: 'python3-venv' 패키지가 필요할 수 있습니다 (apt install python3-venv 등)" >&2
+      echo "    venv 없이 진행하려면: bash setup.sh --no-venv" >&2
+      exit 1
+    fi
+    echo "  ✓ venv 생성 완료"
+  fi
+  TARGET_PY="$VENV_DIR/bin/python3"
+fi
+
+if "$TARGET_PY" -c "import mcp" 2>/dev/null; then
+  echo "  ✓ mcp 패키지 이미 설치됨 ($TARGET_PY)"
 else
   if [ "$NO_PIP" = "1" ]; then
     echo "  · mcp 패키지 미설치 (--no-pip 라 설치 건너뜀)"
-    echo "    수동: $PY -m pip install -r $DIR/requirements.txt"
+    echo "    수동: $TARGET_PY -m pip install -r $DIR/requirements.txt"
   else
-    echo "  → 설치 시도: $PY -m pip install -r $DIR/requirements.txt"
-    if "$PY" -m pip install -r "$DIR/requirements.txt"; then
+    echo "  → 설치 시도: $TARGET_PY -m pip install -r $DIR/requirements.txt"
+    if "$TARGET_PY" -m pip install -r "$DIR/requirements.txt"; then
       echo "  ✓ 설치 완료"
     else
-      echo "  ✗ pip install 실패 — 직접 시도하세요" >&2
+      echo "  ✗ pip install 실패" >&2
+      if [ "$NO_VENV" = "1" ]; then
+        echo "    Homebrew 등 PEP 668 환경에서는 venv 모드를 권장합니다 (--no-venv 빼고 다시 실행)" >&2
+      fi
       exit 1
     fi
   fi

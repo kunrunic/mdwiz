@@ -39,6 +39,11 @@ set -uo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 MDWIZ_HOME="$(cd "$DIR/.." && pwd)"
 
+# Resolve python: explicit MDWIZ_PYTHON > project .venv > system python3
+if [ -z "${MDWIZ_PYTHON:-}" ] && [ -x "$MDWIZ_HOME/.venv/bin/python3" ]; then
+  MDWIZ_PYTHON="$MDWIZ_HOME/.venv/bin/python3"
+fi
+
 # ---------------------------------------------------------------------------
 # arg parsing
 # ---------------------------------------------------------------------------
