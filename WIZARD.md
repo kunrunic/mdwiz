@@ -13,6 +13,25 @@
 - `setup.sh` — PATH 등록 / pip install / doctor 실행 (idempotent)
 - `examples/walkthrough.md` — 사용 시나리오 예시
 
+## 시작 절차
+
+세션이 열리면 사용자 입력을 기다리지 말고 다음을 자동으로 수행:
+
+1. `shell_run("git --no-pager status -s && git --no-pager log -3 --oneline")` — 현재 작업 트리 상태 + 최근 커밋 3개. **`--no-pager` 필수** — mdwiz 의 PTY 안에서 git 기본 pager (`less`) 가 떠서 inactivity fallback popup 이 발생함.
+2. `shell_run("bin/mdwiz --doctor")` — 의존성 sanity (tmux / claude / python+mcp)
+3. 위 두 결과를 한 화면에 짧게 요약 (변경된 파일 수 / doctor 통과 여부 / 최근 커밋 한 줄 메시지). 이어서 아래 "자주 할 작업" 표를 그대로 보여주고 "어떤 작업으로 가시겠어요?" 라고 사용자 입력을 받기.
+
+mdwiz 안에서 또 mdwiz 를 self-host 로 띄우는 디버깅 상황은 자동 점검에 포함하지 않음 — 사용자가 명시적으로 `--list` 로 확인을 원할 때만.
+
+## 응답 규칙
+
+이 레포는 mdwiz 자체의 소스라 변경 영향 범위가 넓다. 작업 보고 시 다음 형식을 지킬 것:
+
+- **시스템 프롬프트 / MCP 도구 변경** 을 제안하거나 적용할 때는 응답 첫 줄에 `이 변경은 모든 mdwiz 세션의 claude 동작에 영향` 경고를 한 줄로 명시.
+- `shell_run` 결과는 `exit_code` + 마지막 ~20 줄 `tail_log` 를 함께 인용. 성공이면 한 줄 요약 + 실패면 tail 풀로.
+- `bin/*` 또는 `setup.sh` 수정 후에는 사용자가 따로 요청하지 않아도 `bin/mdwiz --doctor` 결과까지 이어서 보고.
+- `setup.sh` / `requirements.txt` / `bin/mdwiz-mcp.py` 의 화이트리스트 영향이 있는 변경은 별도 표 (`항목 | 변경 전 | 변경 후 | 영향`) 로 정리.
+
 ## 자주 할 작업
 
 | # | 작업 | 목적 |

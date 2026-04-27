@@ -14,6 +14,14 @@ mdwiz:
 
 > 상단 frontmatter 의 `mdwiz:` 영역은 mdwiz 가 자동으로 읽는 설정. `prompts` 추가 → 1차 매칭 즉시. `commands` → cmd 별 inactivity/timeout 오버라이드.
 
+## 시작 절차
+
+세션이 열리면 사용자 입력을 기다리지 말고 다음을 자동으로 수행:
+
+1. `shell_run("ls scripts/ && ls /tmp/mdwiz-demo-* 2>/dev/null || echo '(no prior demo trace)'")` — 사용 가능한 데모 스크립트 목록 + 이전 세션 흔적 여부 확인
+2. 아래 "자주 할 작업" 표 + "deploy env 별 정책" 표를 한 번에 보여주고 "어떤 데모를 시도해볼까요?" 라고 사용자 입력 받기.
+3. 이전 흔적이 없으면 (= 처음) **`register dev` → `deploy dev` 흐름** 을 추천 텍스트로 함께 안내 — `License Key:` inactivity fallback 과 `API Key:` 자동 popup 두 가지 mdwiz 핵심 동작을 가장 빨리 체험하는 경로.
+
 ## 자주 할 작업
 
 | 작업 | 명령 | 비번 | 설명 |
@@ -44,6 +52,26 @@ mdwiz:
 2. `deploy` 는 `<env>` 인자가 필요 (`dev` / `staging` / `prod` 중 하나). 사용자에게 chat 으로 묻고 진행.
 3. `deploy` 중 `API Key:` 프롬프트가 뜨면 mdwiz popup 이 자동으로 처리. 비번은 chat 에 안 남는다.
 4. 모든 작업은 `shell_run` 으로. 결과의 `tail_log` 와 `exit_code` 를 사용자에게 짧게 요약.
+
+## 응답 규칙 (mdwiz 출력 형식)
+
+이 프로젝트의 mdwiz 가 결과를 보고할 때는 다음 형식을 따른다 (시스템 프롬프트의 일반 가이드보다 이 규칙이 우선).
+
+### `deploy` / `register` 결과 — 표 형식
+
+| env | 명령 | exit_code | 소요 | tail (마지막 3 줄) |
+|---|---|---|---|---|
+| `dev` | `bash scripts/deploy.sh dev` | 0 | 2s | … |
+
+여러 env 를 연달아 실행했으면 한 표에 행으로 누적해서 한꺼번에 보여줄 것.
+
+### `check` / `status` / `cleanup` 결과 — 한 줄 요약
+
+성공: ``✓ <env> — <한 줄 메시지>``. 실패: ``✗ <env> — <원인 한 줄>`` + 그 밑에 `tail_log` 마지막 5 줄.
+
+### frontmatter (`prompts` / `commands`) 갱신을 제안할 때
+
+변경 전/후 diff 를 ` ```yaml ... ``` ` code block 으로 보여주고 confirm 받기. 본문 절차 변경은 `.md` 그대로 (시스템 프롬프트의 fs_write 미리보기 규칙).
 
 ## 주의사항
 
