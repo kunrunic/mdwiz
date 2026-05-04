@@ -407,19 +407,19 @@ exec claude \\
 EOF
 chmod +x "$WRAPPER"
 
-# 스크롤백은 터미널 (iTerm2/Terminal/...) 의 native 스크롤이 가장 자연스럽고
-# 모드 전환 없이 동작하므로 tmux mouse / wheel binding 은 두지 않음.
-# 사용자가 트랙패드/휠 그대로 → 터미널 native scrollback (모든 history 보존).
-#
-# tmux 자체의 history-limit 은 defensive 로 크게 잡아두고
-# (capture-pane -S -1000 같은 디버깅 가능), copy-mode 가 필요하면
-# Ctrl+B [ 로 진입 (mode-keys vi 라 vi 키 동작) → q 로 빠짐.
+# iTerm2 는 tmux attach 후에도 자체 scrollback buffer 를 유지해 native 스크롤이 동작.
+# 그 외 터미널 (CMUX, VSCode 내장, Terminal.app 등) 은 tmux mouse on 없이는
+# 스크롤 이벤트가 아무것도 안 함 → mouse on 으로 copy-mode 진입하게 해서 스크롤 제공.
+# copy-mode: 트랙패드/휠로 위아래, q 로 빠짐 (mode-keys vi).
 #
 # extended-keys + terminal-features 의 *:extkeys 는 Shift+Enter / Ctrl+Arrow
 # 같은 modifyOtherKeys 시퀀스를 tmux 가 안 가로채고 claude 에 그대로 전달.
 tmux set-option -g  history-limit 50000 2>/dev/null || true
 tmux set-option -s  extended-keys on 2>/dev/null || true
 tmux set-option -as terminal-features "*:extkeys" 2>/dev/null || true
+if [ "${TERM_PROGRAM:-}" != "iTerm.app" ]; then
+  tmux set-option -g mouse on 2>/dev/null || true
+fi
 
 tmux new-session -d -s "$SESSION" -x 200 -y 50 "$WRAPPER"
 tmux set-window-option -t "$SESSION" mode-keys vi 2>/dev/null || true
@@ -435,7 +435,11 @@ fi
 # attach 직전 한 줄 — 자세한 배너는 attach 종료 후
 echo
 echo "▶ mdwiz: $SESSION  ($ROOT)"
-echo "  종료: claude /exit  /  detach: Ctrl+B d  /  스크롤: 터미널 트랙패드·휠 그대로"
+if [ "${TERM_PROGRAM:-}" = "iTerm.app" ]; then
+  echo "  종료: claude /exit  /  detach: Ctrl+B d  /  스크롤: 터미널 트랙패드·휠 그대로"
+else
+  echo "  종료: claude /exit  /  detach: Ctrl+B d  /  스크롤: 트랙패드·휠 (copy-mode, q 로 빠짐)"
+fi
 echo
 
 sleep 0.5

@@ -66,6 +66,17 @@ MDWIZ_WRITE_GLOBS='manifests/*.yaml,scripts/*.sh' mdwiz
 mdwiz --kill
 ```
 
+## 권장 터미널
+
+| 터미널 | Shift+Enter | 비고 |
+|---|---|---|
+| **iTerm2** | ✓ | **권장** — 확장 키 시퀀스 지원 |
+| CMUX | ✓ | 확장 키 시퀀스 지원 |
+| macOS Terminal.app | ✗ | Shift+Enter 구분 불가 |
+| VSCode 내장 터미널 | ✗ | Shift+Enter 구분 불가 |
+
+> Shift+Enter 줄 바꿈은 터미널 에뮬레이터가 확장 키 시퀀스를 지원해야 동작합니다. mdwiz 자체의 제한이 아닙니다.
+
 ## 환경변수
 
 | 이름 | 기본값 | 설명 |
@@ -172,7 +183,7 @@ mdwiz --kill
 
 | 문제 | 해결책 |
 |---|---|
-| Shift+Enter로 줄 바꿈이 안 됨 | `extended-keys` 설정이 문제일 수 있음. mdwiz를 재시작하세요. |
+| Shift+Enter로 줄 바꿈이 안 됨 | 터미널 에뮬레이터가 확장 키 시퀀스를 지원하지 않는 경우입니다. **iTerm2** 사용을 권장합니다. |
 | 종료 후 터미널 폰트/입력이 이상함 | `reset` 또는 `stty sane` 입력. mdwiz는 종료 시 터미널 상태를 자동 복구하려 시도합니다. |
 | "1 MCP server failed" 에러 | MCP 설정의 Python 절대 경로를 확인. `mdwiz --doctor` 실행해서 의존성 재확인. |
 | tmux 세션이 이미 존재한다고 나옴 | `mdwiz --kill`로 기존 세션을 정리한 후 다시 시도. |
