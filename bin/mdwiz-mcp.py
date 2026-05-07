@@ -98,16 +98,19 @@ def _log(msg: str) -> None:
 #     prompts:                                # default 패턴에 추가될 regex
 #       - "API Key:"
 #       - "[Cc]ode:"
-#     commands:                               # cmd 매칭 시 timing 오버라이드
+#     commands:                               # cmd 매칭 시 timing/stream 오버라이드
 #       - match: "bash scripts/deploy.sh prod*"  # fnmatch glob against full cmd
 #         inactivity_sec: 1800
 #         timeout_sec: 7200
+#         stream: true                        # 긴 명령 — split-pane 자동 발동
 #       - match: "bash scripts/build.sh*"
 #         inactivity_sec: 600
+#         stream: true
 #   ---
 #
 # - prompts: default + per-call prompt_patterns 와 함께 union
 # - commands: 첫 매치가 적용. 호출자가 명시 인자를 줬으면 그걸 우선.
+#             stream 키는 호출자가 stream=False (default) 일 때만 적용.
 #
 # 매 shell_run 호출 시 새로 read — claude 가 mid-session 에 WIZARD.md 갱신해도
 # 다음 호출부터 즉시 반영.
@@ -248,6 +251,20 @@ def _request_sideband_input(prompt: str, cmd: str, meta: dict) -> str | None:
         return None
 
 
+def _sideband_notify(msg: dict) -> None:
+    """Fire-and-forget sideband message (no response expected)."""
+    if not SOCKET:
+        return
+    try:
+        s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        s.settimeout(3)
+        s.connect(SOCKET)
+        s.sendall(json.dumps(msg).encode() + b"\n")
+        s.close()
+    except Exception as e:
+        _log(f"sideband notify error ({msg.get('op','?')}): {e}")
+
+
 @mcp.tool()
 def shell_run(
     cmd: str,
@@ -257,6 +274,7 @@ def shell_run(
     timeout_sec: int = 1800,
     tail_lines: int = 200,
     inactivity_sec: int = 60,
+    stream: bool = False,
 ) -> dict:
     """
     Run a shell command in a PTY. Combined stdout/stderr captured.
@@ -273,6 +291,11 @@ def shell_run(
     User in popup can either type the value (injected to PTY stdin) or cancel
     (Ctrl+C) which kills the process.
 
+    Long-running commands: pass `stream=True` (or set `stream: true` on the
+    matching commands[] entry in WIZARD.md frontmatter) to also tee raw
+    output to a tmux split-pane while the command runs. The pane auto-closes
+    on exit_code=0; non-zero stays open (user closes with q).
+
     Args:
       cmd            : full command line (passed to bash -c).
       cwd            : working directory (default: MDWIZ_ROOT).
@@ -282,6 +305,9 @@ def shell_run(
       tail_lines     : tail length to return (default 200).
       inactivity_sec : seconds of silence before fallback popup fires
                        (default 60; 0 = disabled).
+      stream         : if True, raw stdout/stderr is also tail -F'd in a tmux
+                       split-pane while the command runs (default False —
+                       short commands keep the silent behaviour).
 
     Returns:
       {exit_code, tail_log, prompts_seen, duration_sec, killed_for_prompt}
@@ -301,6 +327,10 @@ def shell_run(
         if inactivity_sec == 60 and "inactivity_sec" in overrides:
             inactivity_sec = int(overrides["inactivity_sec"])
             _log(f"WIZARD.md override: inactivity_sec={inactivity_sec} (cmd matched '{overrides['match']}')")
+        if not stream and "stream" in overrides:
+            stream = bool(overrides["stream"])
+            if stream:
+                _log(f"WIZARD.md override: stream=True (cmd matched '{overrides['match']}')")
 
     cmd_env = os.environ.copy()
     if env:
@@ -327,6 +357,29 @@ def shell_run(
     exit_code: int | None = None
     last_output_time = time.time()
 
+    # stream 모드 — child pid 기반 로그파일 + helper 에 split-pane 띄우라고 통지.
+    # pid 는 helper 측 pane 추적 dict 의 key 로도 쓰임 (close 시 매칭).
+    stream_log_path: str | None = None
+    stream_log_fd: int | None = None
+    if stream:
+        stream_log_path = f"/tmp/mdwiz-stream-{pid}.log"
+        try:
+            stream_log_fd = os.open(
+                stream_log_path,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                0o600,
+            )
+            _sideband_notify({
+                "op": "stream_open",
+                "pid": pid,
+                "log_path": stream_log_path,
+                "title": cmd[:60],
+            })
+        except OSError as e:
+            _log(f"stream log open failed ({stream_log_path}): {e} — falling back to non-stream")
+            stream_log_fd = None
+            stream_log_path = None
+
     try:
         while True:
             if time.time() - start > timeout_sec:
@@ -348,6 +401,11 @@ def shell_run(
                 if chunk:
                     last_output_time = time.time()
                     output.extend(chunk)
+                    if stream_log_fd is not None:
+                        try:
+                            os.write(stream_log_fd, chunk)
+                        except OSError as e:
+                            _log(f"stream log write failed: {e}")
                     line_buf += chunk.decode("utf-8", errors="replace")
 
                     while "\n" in line_buf:
@@ -427,6 +485,11 @@ def shell_run(
                         if not chunk:
                             break
                         output.extend(chunk)
+                        if stream_log_fd is not None:
+                            try:
+                                os.write(stream_log_fd, chunk)
+                            except OSError:
+                                pass
                 except OSError:
                     pass
                 break
@@ -435,6 +498,11 @@ def shell_run(
             os.close(fd)
         except OSError:
             pass
+        if stream_log_fd is not None:
+            try:
+                os.close(stream_log_fd)
+            except OSError:
+                pass
 
     if exit_code is None:
         try:
@@ -451,6 +519,14 @@ def shell_run(
     text = output.decode("utf-8", errors="replace")
     masked = _mask_prompts(text, patterns)
     tail = "\n".join(masked.splitlines()[-tail_lines:])
+
+    if stream_log_path is not None:
+        _sideband_notify({
+            "op": "stream_close",
+            "pid": pid,
+            "log_path": stream_log_path,
+            "exit_code": exit_code if exit_code is not None else -1,
+        })
 
     return {
         "exit_code": exit_code,

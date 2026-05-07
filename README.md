@@ -121,12 +121,14 @@ mdwiz --kill
 
 | 도구 | 용도 | 예 |
 |---|---|---|
-| `shell_run(cmd, cwd?, env?, timeout_sec?)` | 셸 명령 실행 (PTY 환경). 비밀번호 프롬프트 자동 감지 → popup | `shell_run("git clone ssh://...")` |
+| `shell_run(cmd, cwd?, env?, timeout_sec?, stream?)` | 셸 명령 실행 (PTY 환경). 비밀번호 프롬프트 자동 감지 → popup. `stream=True` 또는 WIZARD.md frontmatter `stream: true` 매칭 시 tmux split-pane 에 실시간 출력 | `shell_run("git clone ssh://...")` |
 | `fs_read(path)` | 파일 읽기 또는 디렉터리 목록 | `fs_read('README.md')` 또는 `fs_read('.')` |
 | `fs_write(path, content)` | 파일 쓰기 (화이트리스트 내에서만) | `fs_write('config.json', '...')` |
 | `progress(stage, ...)` | 진행 단계 알림 | `progress('clone', '완료')` |
 
 **비밀번호 처리**: `shell_run` 안에서 "Password:", "Passphrase:" 같은 패턴이 나타나면 mdwiz가 자동으로 popup을 띄웁니다. Claude는 비밀번호를 채팅에서 묻지 않습니다.
+
+**실시간 출력 (`stream`)**: 긴 빌드/설치처럼 진행 상황이 중요한 명령은 위쪽 40% 에 split-pane 이 떠서 raw 출력을 `tail -F` 로 보여줍니다. 성공 시 자동 닫힘, 실패 시 사용자 키 입력까지 유지. ⚠️ 사내 스크립트에서 비번을 받는다면 반드시 `read -s VAR` (echo off) 사용 — 그렇지 않으면 입력값이 pane 에 노출됩니다.
 
 ## 비밀번호 팝업 동작
 

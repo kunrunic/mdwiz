@@ -2,34 +2,50 @@
 """
 mdwiz-helper.py — sideband server for mdwiz.
 
-Listens on a unix socket. When mdwiz-mcp's shell_run hits an interactive
-prompt (e.g. git password) inside its inner PTY, it connects, sends a JSON
-request, and blocks for a JSON response. This helper handles each request
-by popping `tmux display-popup -E` over the user's tmux session, running
-mdwiz-pwprompt.sh to capture the input.
+Listens on a unix socket. mdwiz-mcp connects for two kinds of operations:
+
+  1. prompt_request — shell_run hit an interactive prompt (password etc.).
+     Helper pops `tmux display-popup -E` over the user's tmux session,
+     runs mdwiz-pwprompt.sh to capture the input, and sends it back.
+  2. stream_open / stream_close — shell_run is running with stream=True.
+     Helper splits a tmux pane that `tail -F`'s the raw output log so the
+     user sees progress while the inner PTY runs.
 
 Protocol (newline-delimited JSON):
-  client → helper:  {"op":"prompt_request","prompt":"...","cmd":"...","meta":{...}}
-  helper → client:  {"value":"<entered text>"}            # success
-  helper → client:  {"value":"","cancelled":true}         # cancelled
-  helper → client:  {"value":"","error":"..."}            # internal error
+  prompt:
+    client → helper:  {"op":"prompt_request","prompt":"...","cmd":"...","meta":{...}}
+    helper → client:  {"value":"<entered text>"}            # success
+    helper → client:  {"value":"","cancelled":true}         # cancelled
+    helper → client:  {"value":"","error":"..."}            # internal error
+  stream (fire-and-forget — helper does not respond):
+    client → helper:  {"op":"stream_open","pid":N,"log_path":"...","title":"..."}
+    client → helper:  {"op":"stream_close","pid":N,"log_path":"...","exit_code":N}
 """
 
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
+import shlex
 import socket
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 
 HERE = Path(__file__).resolve().parent
 PWPROMPT = HERE / "mdwiz-pwprompt.py"
+
+# pid → tmux pane id, for stream_open/close lifecycle. Multiple shell_run
+# 호출이 동시에 발생할 일은 단일 mcp 서버에서 거의 없지만 (tool dispatch 가
+# 순차) handler thread 별로 dict 를 건드리므로 lock.
+_panes: dict[int, str] = {}
+_panes_lock = threading.Lock()
 
 
 def log(msg: str) -> None:
@@ -83,6 +99,85 @@ def show_popup(session: str, req: dict) -> dict:
                 pass
 
 
+def open_stream_pane(session: str, req: dict) -> None:
+    """tmux split-window 으로 위쪽 40% pane 띄워 tail -F 시작."""
+    pid = req.get("pid")
+    log_path = req.get("log_path")
+    title = (req.get("title") or "").replace("'", "")[:60]
+    if not (isinstance(pid, int) and log_path):
+        log(f"stream_open: invalid req {req!r}")
+        return
+
+    # pane 안에서 실행할 셸 한 줄. exit 후 사용자가 read 키 누를 때까지 유지
+    # (helper 가 stream_close 받았을 때 자동 닫을지 결정 — close handler 가
+    #  exit_code=0 이면 kill-pane 으로 내림. read 는 fallback).
+    banner = f"[mdwiz stream — {title}]" if title else "[mdwiz stream]"
+    inner = (
+        f"echo '{banner}'; "
+        f"tail -F {shlex.quote(log_path)} 2>/dev/null; "
+        f"echo; echo '[done — 아무 키나 눌러 닫기]'; "
+        f"read -n1 -s"
+    )
+
+    # -v: vertical split (위/아래로 가름), -b: 새 pane 을 위쪽에, -l 40%: 새 pane 크기.
+    # -P -F '#{pane_id}' 로 새 pane id 받음.
+    try:
+        out = subprocess.check_output(
+            [
+                "tmux", "split-window",
+                "-t", f"{session}:0",
+                "-v", "-b",
+                "-l", "40%",
+                "-P", "-F", "#{pane_id}",
+                inner,
+            ],
+            stderr=subprocess.PIPE,
+        )
+    except subprocess.CalledProcessError as e:
+        log(f"stream_open: tmux split-window failed: {e.stderr.decode(errors='replace').strip()}")
+        return
+
+    pane_id = out.decode().strip()
+    with _panes_lock:
+        _panes[pid] = pane_id
+    log(f"stream_open: pid={pid} pane={pane_id} log={log_path}")
+
+
+def close_stream_pane(req: dict) -> None:
+    """exit_code=0 이면 짧게 보여주고 kill-pane, 아니면 사용자 q 까지 유지."""
+    pid = req.get("pid")
+    log_path = req.get("log_path")
+    exit_code = req.get("exit_code", -1)
+    if not isinstance(pid, int):
+        log(f"stream_close: invalid req {req!r}")
+        return
+
+    with _panes_lock:
+        pane_id = _panes.pop(pid, None)
+
+    def _finalize() -> None:
+        # 0.5초 — tail -F 폴링이 마지막 chunk 를 보여줄 시간.
+        time.sleep(0.5)
+        if pane_id and exit_code == 0:
+            subprocess.run(
+                ["tmux", "kill-pane", "-t", pane_id],
+                check=False,
+                stderr=subprocess.DEVNULL,
+            )
+        # 로그 파일 unlink — pane 이 살아있어도 tail -F 는 inode 유지하고 있어 OK.
+        if log_path:
+            try:
+                os.unlink(log_path)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                log(f"stream_close: unlink {log_path} failed: {e}")
+
+    threading.Thread(target=_finalize, daemon=True).start()
+    log(f"stream_close: pid={pid} exit={exit_code} pane={pane_id or '(none)'}"
+        f"{' — auto-close' if exit_code == 0 else ' — keep-open'}")
+
+
 def handle_client(conn: socket.socket, session: str) -> None:
     try:
         buf = b""
@@ -93,6 +188,17 @@ def handle_client(conn: socket.socket, session: str) -> None:
             buf += chunk
         line, _ = buf.split(b"\n", 1)
         req = json.loads(line)
+        op = req.get("op", "prompt_request")
+
+        if op == "stream_open":
+            open_stream_pane(session, req)
+            return  # fire-and-forget, no response
+
+        if op == "stream_close":
+            close_stream_pane(req)
+            return  # fire-and-forget, no response
+
+        # default: prompt_request
         log(f"prompt_request from cmd={req.get('cmd','?')[:40]!r}")
         resp = show_popup(session, req)
         conn.sendall(json.dumps(resp).encode() + b"\n")
@@ -110,6 +216,17 @@ def handle_client(conn: socket.socket, session: str) -> None:
             pass
 
 
+def _cleanup_stream_logs() -> None:
+    """비정상 종료로 남은 /tmp/mdwiz-stream-*.log 잔재를 지운다.
+    O_CREAT 로 helper 가 만든 게 아니라 mcp 가 만든 것이므로, 권한 없는
+    (타 user) 파일은 unlink 가 자연스레 실패 — 무시."""
+    for f in glob.glob("/tmp/mdwiz-stream-*.log"):
+        try:
+            os.unlink(f)
+        except OSError:
+            pass
+
+
 def serve(socket_path: str, session: str) -> None:
     if os.path.exists(socket_path):
         os.unlink(socket_path)
@@ -117,6 +234,7 @@ def serve(socket_path: str, session: str) -> None:
     srv.bind(socket_path)
     os.chmod(socket_path, 0o600)
     srv.listen(8)
+    _cleanup_stream_logs()
     log(f"listening on {socket_path} (session={session})")
 
     try:
@@ -132,6 +250,7 @@ def serve(socket_path: str, session: str) -> None:
             os.unlink(socket_path)
         except Exception:
             pass
+        _cleanup_stream_logs()
 
 
 if __name__ == "__main__":

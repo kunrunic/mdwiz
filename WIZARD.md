@@ -128,6 +128,31 @@ shell_run("bin/mdwiz --kill --all")        # 전부 (interactive 확인 필요 �
 | 중간 | `setup.sh` 의 rc 파일 수정 | `.zshrc` 등에 PATH 라인 추가 | marker 주석으로 식별 가능, idempotent (이미 있으면 skip) |
 | 낮음 | `mdwiz --kill --all` | 다른 작업 중인 세션도 같이 끔 | confirm 거치므로 보통 안전 |
 
+## 긴 명령의 실시간 출력 (`stream`)
+
+`shell_run` 은 기본적으로 명령이 끝난 후에야 출력을 한 번에 돌려준다. 긴 빌드/설치처럼 진행 상황이 중요한 명령은 두 가지 방식으로 tmux split-pane 에 raw 출력을 흘려보낼 수 있다:
+
+1. **호출 인자**: `shell_run("...", stream=True)` — AI 가 long-running 으로 판단할 때.
+2. **WIZARD.md frontmatter** — 프로젝트의 `WIZARD.md` 상단 yaml block 에 미리 지정:
+
+   ```yaml
+   ---
+   mdwiz:
+     commands:
+       - match: "bash scripts/build.sh*"
+         stream: true
+         inactivity_sec: 600
+   ---
+   ```
+
+동작:
+- 위쪽 40% 에 새 pane 이 뜨고 `tail -F` 로 실시간 출력.
+- 명령 성공 (`exit_code=0`) — pane 0.5초 뒤 자동 닫힘.
+- 명령 실패 — pane 그대로 유지, 사용자가 아무 키나 눌러 닫음.
+- password popup 과 동시에 떠도 충돌 없음 (출력 채널 ↔ 입력 채널 분리).
+
+보안 주의: `read VAR` 처럼 echo on 으로 비번을 받는 사내 스크립트가 있다면 입력값이 stream pane 에 그대로 노출된다. SSH/sudo 같이 정상적으로 echo off 인 경우는 안전. 사용 스크립트 측에서 `read -s VAR` 권장.
+
 ## 쓰기 권한 (MDWIZ_WRITE_GLOBS)
 
 이 프로젝트의 mdwiz 세션을 띄울 때 쓰기 가능 패턴 권장:
