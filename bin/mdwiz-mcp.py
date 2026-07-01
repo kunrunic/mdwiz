@@ -333,6 +333,13 @@ def shell_run(
                 _log(f"WIZARD.md override: stream=True (cmd matched '{overrides['match']}')")
 
     cmd_env = os.environ.copy()
+    # PTY pager 함정 원천 차단: git(config/log/diff/show/branch...) · man · systemctl 등이
+    # stdout=TTY 를 보고 pager(less) 를 띄워 hang 되는 것을 막는다. cat 은 즉시 EOF 로 흘려보냄.
+    # 명시적으로 넘어온 env 는 아래에서 override 가능 (의도적 pager 사용 여지 유지).
+    cmd_env["GIT_PAGER"] = "cat"
+    cmd_env["PAGER"] = "cat"
+    cmd_env["MANPAGER"] = "cat"
+    cmd_env["SYSTEMD_PAGER"] = ""
     if env:
         cmd_env.update(env)
     work_cwd = cwd or str(ROOT)

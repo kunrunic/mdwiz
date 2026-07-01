@@ -120,13 +120,15 @@ def open_stream_pane(session: str, req: dict) -> None:
     )
 
     # -v: vertical split (위/아래로 가름), -b: 새 pane 을 위쪽에, -l 40%: 새 pane 크기.
+    # -d: 새 pane 으로 포커스 넘기지 않음 — 스트림 pane 은 표시 전용이고,
+    #     사용자 입력 포커스는 chat pane(%0)에 그대로 남겨야 한다.
     # -P -F '#{pane_id}' 로 새 pane id 받음.
     try:
         out = subprocess.check_output(
             [
                 "tmux", "split-window",
                 "-t", f"{session}:0",
-                "-v", "-b",
+                "-v", "-b", "-d",
                 "-l", "40%",
                 "-P", "-F", "#{pane_id}",
                 inner,

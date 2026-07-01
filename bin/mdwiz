@@ -414,14 +414,24 @@ chmod +x "$WRAPPER"
 #
 # extended-keys + terminal-features 의 *:extkeys 는 Shift+Enter / Ctrl+Arrow
 # 같은 modifyOtherKeys 시퀀스를 tmux 가 안 가로채고 claude 에 그대로 전달.
+#
+# 중요: set-option 은 반드시 new-session *다음*에 실행한다.
+# new-session 전에 두면 (start-server 를 써도) 안 먹는다 — start-server 로 띄운
+# 빈 서버는 exit-empty(기본 on) 때문에 세션이 하나도 없는 순간 스스로 종료되어,
+# 이어지는 set-option 이 "no server running" 으로 조용히 실패(|| true)하고
+# new-session 이 기본값(extended-keys off, history-limit 2000)으로 새 서버를 띄운다.
+# 세션이 살아있는 상태에서 걸어야 서버가 안 죽고 값이 유지된다.
+tmux new-session -d -s "$SESSION" -x 200 -y 50 "$WRAPPER"
+
+# extended-keys(서버 옵션)는 즉시 적용되어 Shift+Enter 를 살린다.
+# history-limit 은 global 이라 앞으로 생성되는 pane(스트림 pane 등)에 적용된다
+# (claude pane 자체는 이미 생성돼 기본 2000 유지 — iTerm2 native scrollback 이라 무관).
 tmux set-option -g  history-limit 50000 2>/dev/null || true
 tmux set-option -s  extended-keys on 2>/dev/null || true
 tmux set-option -as terminal-features "*:extkeys" 2>/dev/null || true
 if [ "${TERM_PROGRAM:-}" != "iTerm.app" ]; then
   tmux set-option -g mouse on 2>/dev/null || true
 fi
-
-tmux new-session -d -s "$SESSION" -x 200 -y 50 "$WRAPPER"
 tmux set-window-option -t "$SESSION" mode-keys vi 2>/dev/null || true
 # `mdwiz --list` 가 root 경로를 알 수 있게 session-environment 에 등록
 tmux set-environment -t "$SESSION" MDWIZ_ROOT "$ROOT" 2>/dev/null || true
