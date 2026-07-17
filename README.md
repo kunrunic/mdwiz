@@ -189,6 +189,68 @@ mdwiz --kill
 | 종료 후 터미널 폰트/입력이 이상함 | `reset` 또는 `stty sane` 입력. mdwiz는 종료 시 터미널 상태를 자동 복구하려 시도합니다. |
 | "1 MCP server failed" 에러 | MCP 설정의 Python 절대 경로를 확인. `mdwiz --doctor` 실행해서 의존성 재확인. |
 | tmux 세션이 이미 존재한다고 나옴 | `mdwiz --kill`로 기존 세션을 정리한 후 다시 시도. |
+| ssh로 접속해서 mdwiz를 띄우면 Claude가 매번 로그인을 요구함 (macOS) | Keychain ACL 문제입니다. → [SSH 환경에서의 Claude 인증](#ssh-환경에서의-claude-인증-macos) |
+| `Your organization has disabled Claude subscription access` | `CLAUDE_CODE_OAUTH_TOKEN`이 로컬 세션까지 새어 Keychain 인증을 덮어쓴 경우입니다. → [SSH 환경에서의 Claude 인증](#ssh-환경에서의-claude-인증-macos) |
+
+## SSH 환경에서의 Claude 인증 (macOS)
+
+mdwiz는 tmux 세션 안에서 Claude Code를 띄웁니다(`bin/mdwiz:424`). macOS에서 **ssh로 접속해
+mdwiz를 실행하면 Claude가 매번 로그인 화면을 띄우는데**, 로컬 GUI 터미널에서는 멀쩡합니다.
+
+**원인**: Claude Code의 자격증명은 macOS login Keychain(`Claude Code-credentials`)에 저장되는데,
+ssh 세션은 GUI와 다른 security session이라 그 항목을 읽지 못합니다. Keychain이 `no-timeout`이어도
+마찬가지입니다 — 그건 GUI 세션 한정입니다. ssh 세션 안에서 진단:
+
+```bash
+security find-generic-password -s "Claude Code-credentials" -w >/dev/null; echo "exit=$?"
+# 36 = errSecInteractionNotAllowed (ACL 거부) → 아래 해결책 적용
+# 44 = 항목 없음 / 0 = 정상(다른 원인)
+```
+
+**해결**: OAuth 토큰을 **ssh 세션에만** 주입합니다.
+
+```bash
+claude setup-token                                  # GUI 터미널에서 발급
+
+umask 077
+printf '%s' 'sk-ant-oat01-...' > ~/.claude/ssh-token   # echo 금지 (아래 주의)
+chmod 600 ~/.claude/ssh-token
+```
+
+`~/.zshenv`에 추가:
+
+```zsh
+# 인바운드 ssh 세션에서만 Claude Code 토큰을 주입한다.
+# 로컬에는 주입하지 않는다 — 로컬은 keychain 으로 정상 인증되며,
+# 여기서 export 하면 그 인증을 덮어써 organization 오류가 난다.
+if [[ -n "${SSH_CONNECTION:-}" && -r "$HOME/.claude/ssh-token" ]]; then
+  export CLAUDE_CODE_OAUTH_TOKEN="$(<"$HOME/.claude/ssh-token")"
+fi
+```
+
+검증:
+
+```zsh
+zsh -c 'echo "local=[${CLAUDE_CODE_OAUTH_TOKEN:-empty}]"'                 # empty 여야 정상
+SSH_CONNECTION="x" zsh -c 'echo "ssh=[${CLAUDE_CODE_OAUTH_TOKEN:0:12}]"'  # 토큰이 나와야 정상
+```
+
+**주의사항**
+
+- **토큰을 `~/.zshenv`에 무조건 `export` 하지 마세요.** ssh뿐 아니라 로컬 세션 전체로 퍼져
+  Keychain 인증을 덮어쓰고 `Your organization has disabled Claude subscription access`를 냅니다.
+  토큰이 만료되면 로컬까지 같이 죽습니다. 반드시 위처럼 `SSH_CONNECTION` 가드를 씁니다.
+- **`echo` 대신 `printf`**. `echo '%s' '<토큰>'`은 포맷을 해석하지 않아 파일에 `%s <토큰>`이
+  그대로 들어가고 개행까지 붙어 인증이 깨집니다. `wc -c < ~/.claude/ssh-token`이 토큰 길이와
+  정확히 같아야 정상입니다.
+- **토큰을 바꾸거나 지운 뒤에는 `tmux kill-server` + 터미널 재시작.** tmux 서버는 기동 시점의
+  환경을 죽을 때까지 유지하며 새 pane마다 주입합니다. 이미 열린 셸도 자기 env에 옛 값을
+  들고 있습니다. 둘 다 정리하지 않으면 파일을 고쳐도 옛 토큰이 계속 쓰입니다.
+  확인: `tmux show-environment -g | grep CLAUDE_CODE_OAUTH`
+- Claude 배너가 `Claude API`면 토큰 모드, 계정 표시가 뜨면 구독(Keychain) 모드입니다.
+  로컬에서 `Claude API`가 보이면 토큰이 새고 있다는 신호입니다.
+
+> 같은 증상을 tmux/ssh 관점에서 더 자세히 다룬 문서: `claude-bridge/docs/troubleshooting.md`
 
 ## 파일 구조
 
