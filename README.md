@@ -32,7 +32,7 @@ bash setup.sh
 ```bash
 # 의존성 확인:
 #   - claude (Claude Code CLI)
-#   - tmux
+#   - tmux >= 3.2  (display-popup / extended-keys 필요)
 #   - python3 + pip
 
 # 1. Python 의존성 설치
@@ -186,7 +186,9 @@ mdwiz --kill
 | 문제 | 해결책 |
 |---|---|
 | Shift+Enter로 줄 바꿈이 안 됨 | 터미널 에뮬레이터가 확장 키 시퀀스를 지원하지 않는 경우입니다. **iTerm2** 사용을 권장합니다. |
-| 종료 후 터미널 폰트/입력이 이상함 | `reset` 또는 `stty sane` 입력. mdwiz는 종료 시 터미널 상태를 자동 복구하려 시도합니다. |
+| 종료 후 터미널 화면/입력이 이상함 | mdwiz는 종료 시 **시작 시점의 termios(`stty -g`)를 그대로 복원**합니다. 그래도 이상하면 화면 속성만 되돌리세요: `printf '\e[?1049l\e[?25h\e[0m'`. ⚠️ `reset` / `stty sane` 은 `stty erase ^H` 같은 **사용자 커스텀 설정까지 표준값으로 덮어쓰므로** 최후 수단으로만 쓰고, 사용했다면 `exec $SHELL -l` 로 rc 를 다시 적용하세요. |
+| 비번 popup 이 안 뜨고 인증 실패로 진행됨 | tmux 버전이 3.2 미만입니다. `mdwiz --doctor` 로 확인 후 아래 "tmux 3.2+ 가 저장소에 없을 때" 참고. |
+| 결과에 `sideband_error` 가 나옴 | popup 을 띄우지 못해 명령을 중단한 경우입니다 (빈 값을 주입하지 않습니다). 메시지의 사유(tmux 버전/부재, helper 미기동)를 그대로 확인하세요. |
 | "1 MCP server failed" 에러 | MCP 설정의 Python 절대 경로를 확인. `mdwiz --doctor` 실행해서 의존성 재확인. |
 | tmux 세션이 이미 존재한다고 나옴 | `mdwiz --kill`로 기존 세션을 정리한 후 다시 시도. |
 | ssh로 접속해서 mdwiz를 띄우면 Claude가 매번 로그인을 요구함 (macOS) | Keychain ACL 문제입니다. → [SSH 환경에서의 Claude 인증](#ssh-환경에서의-claude-인증-macos) |
@@ -251,6 +253,24 @@ SSH_CONNECTION="x" zsh -c 'echo "ssh=[${CLAUDE_CODE_OAUTH_TOKEN:0:12}]"'  # 토�
   로컬에서 `Claude API`가 보이면 토큰이 새고 있다는 신호입니다.
 
 > 같은 증상을 tmux/ssh 관점에서 더 자세히 다룬 문서: `claude-bridge/docs/troubleshooting.md`
+
+### tmux 3.2+ 가 저장소에 없을 때 (RHEL 8 등)
+
+RHEL 8 계열은 baseos 저장소에 tmux 2.7 만 있어 `display-popup` 이 없습니다. sudo 없이 홈 디렉터리에 정적 빌드를 설치할 수 있습니다:
+
+```bash
+curl -L -o tmux.appimage \
+  https://github.com/nelsonenzo/tmux-appimage/releases/download/3.5a/tmux.appimage
+chmod +x tmux.appimage && ./tmux.appimage --appimage-extract   # FUSE 불필요
+mkdir -p ~/.local/opt ~/.local/bin
+cp -a squashfs-root ~/.local/opt/tmux-3.5a
+ln -sfn ~/.local/opt/tmux-3.5a/usr/bin/tmux ~/.local/bin/tmux  # AppRun 이 아닌 실바이너리
+```
+
+- `~/.local/bin` 이 PATH 에 있어야 합니다.
+- `AppRun` 대신 `usr/bin/tmux` 를 링크 — `AppRun` 은 `TERMINFO` 를 덮어써서 사용자 terminfo 탐색을 방해합니다.
+- 바이너리가 `RPATH $ORIGIN/../lib` 로 번들 libevent 를 참조하므로 **디렉터리 구조를 유지한 채** 복사해야 합니다.
+- 롤백: `rm -rf ~/.local/opt/tmux-3.5a ~/.local/bin/tmux` (시스템 무영향)
 
 ## 파일 구조
 

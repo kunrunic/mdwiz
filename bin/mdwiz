@@ -44,6 +44,13 @@ if [ -z "${MDWIZ_PYTHON:-}" ] && [ -x "$MDWIZ_HOME/.venv/bin/python3" ]; then
   MDWIZ_PYTHON="$MDWIZ_HOME/.venv/bin/python3"
 fi
 
+# tmux 최소 버전 — display-popup(비번 popup) / extended-keys(Shift+Enter) 가 3.2+,
+# split-window -l <pct> 가 3.1+. 셋 중 최댓값이 3.2.
+# 이 미만에서는 해당 호출들이 전부 조용히 실패해 "popup 이 안 뜬다" 는 증상만 남는다.
+TMUX_MIN="3.2"
+TMUX_MIN_MAJOR=3
+TMUX_MIN_MINOR=2
+
 # ---------------------------------------------------------------------------
 # arg parsing
 # ---------------------------------------------------------------------------
@@ -105,13 +112,39 @@ cmd_help() {
 cmd_doctor() {
   local rc=0
   echo "mdwiz doctor — checking dependencies"
-  for c in tmux claude; do
-    if command -v "$c" >/dev/null; then
-      printf "  ✓ %-8s %s\n" "$c" "$(command -v "$c")"
+  # --- tmux: 존재 + 버전 (2.7 처럼 낮으면 popup/stream/Shift+Enter 가 조용히 죽음) ---
+  if command -v tmux >/dev/null; then
+    local tpath traw tver
+    tpath="$(command -v tmux)"
+    traw="$(tmux -V 2>/dev/null)"
+    tver="${traw#tmux }"      # "tmux 3.5a" → "3.5a"
+    tver="${tver#next-}"      # "tmux next-3.4" → "3.4"
+    if [[ "$tver" =~ ^([0-9]+)\.([0-9]+) ]]; then
+      local tmaj="${BASH_REMATCH[1]}" tmin="${BASH_REMATCH[2]}"
+      if [ "$tmaj" -gt "$TMUX_MIN_MAJOR" ] || \
+         { [ "$tmaj" -eq "$TMUX_MIN_MAJOR" ] && [ "$tmin" -ge "$TMUX_MIN_MINOR" ]; }; then
+        printf "  ✓ %-8s %s (%s)\n" "tmux" "$tpath" "$tver"
+      else
+        printf "  ✗ %-8s %s (%s) — %s 이상 필요\n" "tmux" "$tpath" "$tver" "$TMUX_MIN"
+        printf "      %s 에서는 비번 popup(display-popup) / Shift+Enter(extended-keys) /\n" "$tver"
+        printf "      stream split-pane 이 모두 동작하지 않습니다.\n"
+        printf "      배포판 저장소에 3.2+ 가 없으면 홈 디렉터리 설치 — README.md 트러블슈팅 참고\n"
+        rc=1
+      fi
     else
-      printf "  ✗ %-8s MISSING\n" "$c"; rc=1
+      printf "  ⚠ %-8s %s — 버전 파싱 실패 (%s), %s 이상인지 직접 확인하세요\n" \
+        "tmux" "$tpath" "${traw:-출력 없음}" "$TMUX_MIN"
     fi
-  done
+  else
+    printf "  ✗ %-8s MISSING (%s 이상 필요)\n" "tmux" "$TMUX_MIN"; rc=1
+  fi
+
+  # --- claude ---
+  if command -v claude >/dev/null; then
+    printf "  ✓ %-8s %s\n" "claude" "$(command -v claude)"
+  else
+    printf "  ✗ %-8s MISSING\n" "claude"; rc=1
+  fi
   local py="${MDWIZ_PYTHON:-$(command -v python3 || echo)}"
   if [ -x "$py" ]; then
     printf "  ✓ %-8s %s\n" "python3" "$py"
@@ -277,6 +310,15 @@ SYS_TMP=""
 INIT_TMP=""
 WRAPPER=""
 
+# 사용자가 rc 에서 커스터마이즈한 termios (stty erase ^H, stty intr 등) 를 그대로
+# 되돌리기 위해, tmux/claude 가 tty 를 건드리기 전 시점의 설정을 저장해 둔다.
+# `stty sane` 은 이 커스텀을 표준값으로 덮어쓰고, rc 는 로그인 시에만 실행되므로
+# 셸을 새로 띄우기 전까지 복구되지 않는다 (Backspace 가 ^H 로 에코되는 증상 등).
+TTY_SAVED=""
+if [ -t 0 ]; then
+  TTY_SAVED="$(stty -g 2>/dev/null || echo "")"
+fi
+
 # 터미널 상태 복구 — tmux/claude 가 alt-screen, mouse tracking, hidden cursor,
 # 색속성 등을 켰다가 비정상 빠지면 외부 셸이 그 상태로 남아 폰트/입력이 망가짐.
 # 다음 시퀀스로 모두 명시적으로 OFF.
@@ -285,7 +327,13 @@ restore_terminal() {
   # 1015 = urxvt mouse, 1049 = alt-screen, 25 = cursor visible, 0m = SGR reset,
   # 7h = autowrap on
   printf '\e[?1000l\e[?1001l\e[?1002l\e[?1003l\e[?1006l\e[?1015l\e[?1049l\e[?25h\e[0m\e[?7h' 2>/dev/null
-  stty sane 2>/dev/null || true
+  if [ -n "$TTY_SAVED" ]; then
+    # 시작 시점 그대로 복원 — 사용자 커스텀 termios 보존.
+    stty "$TTY_SAVED" 2>/dev/null || stty sane 2>/dev/null || true
+  else
+    # 저장 실패 (비-tty 로 실행 등) — 최소한 raw/echo-off 상태에서는 빠져나오게.
+    stty sane 2>/dev/null || true
+  fi
 }
 
 cleanup() {

@@ -221,10 +221,18 @@ def _kill_tree(pid: int) -> None:
         pass
 
 
-def _request_sideband_input(prompt: str, cmd: str, meta: dict) -> str | None:
-    """Request user input via mdwiz-helper. None if no socket or cancelled."""
+def _request_sideband_input(prompt: str, cmd: str, meta: dict) -> tuple[str | None, str | None]:
+    """Request user input via mdwiz-helper.
+
+    반환 (value, error):
+      ("입력값", None)  — 정상
+      (None, None)      — 사용자가 popup 에서 취소 (Ctrl+C)
+      (None, "사유")    — sideband 자체가 불가 (helper 없음 / popup 실패 등).
+                          이 경우 빈 값을 stdin 에 주입하면 안 된다 — 사용자에게는
+                          "인증 실패" 로만 보이고 원인 추적이 불가능해지기 때문.
+    """
     if not SOCKET:
-        return None
+        return None, "MDWIZ_SOCKET 미설정 — helper 없이 실행 중"
     try:
         s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
         s.settimeout(180)
@@ -241,14 +249,20 @@ def _request_sideband_input(prompt: str, cmd: str, meta: dict) -> str | None:
             buf += chunk
         s.close()
         if not buf:
-            return None
+            return None, "helper 응답 없음 (연결 끊김)"
         resp = json.loads(buf.split(b"\n", 1)[0])
         if resp.get("cancelled"):
-            return None
-        return resp.get("value", "")
+            return None, None
+        err = resp.get("error")
+        if err:
+            return None, str(err)
+        value = resp.get("value")
+        if value is None:
+            return None, "helper 응답에 value 없음"
+        return value, None
     except Exception as e:
         _log(f"sideband error: {e}")
-        return None
+        return None, f"sideband 통신 실패: {e}"
 
 
 def _sideband_notify(msg: dict) -> None:
@@ -311,6 +325,9 @@ def shell_run(
 
     Returns:
       {exit_code, tail_log, prompts_seen, duration_sec, killed_for_prompt}
+      + sideband_error : popup 을 띄우지 못해 명령을 중단한 경우에만 존재.
+                         명령 자체의 실패가 아니라 mdwiz 환경 문제 (tmux 3.2 미만,
+                         helper 미기동 등) 이므로 사용자에게 그대로 전달할 것.
     """
     # WIZARD.md frontmatter 의 prompts / commands 반영
     wiz_cfg = _load_wizard_config()
@@ -361,6 +378,7 @@ def shell_run(
     line_buf = ""
     prompts_seen: list[str] = []
     killed = False
+    sideband_error: str | None = None   # popup 인프라 실패 사유 (사용자 취소와 구분)
     exit_code: int | None = None
     last_output_time = time.time()
 
@@ -426,7 +444,7 @@ def shell_run(
                         if pat.search(line_buf):
                             prompt_text = line_buf.strip()
                             prompts_seen.append(prompt_text)
-                            value = _request_sideband_input(
+                            value, sb_err = _request_sideband_input(
                                 prompt_text, cmd, {"cwd": work_cwd, "exec": "shell_run"},
                             )
                             if value is not None:
@@ -438,7 +456,11 @@ def shell_run(
                                     _log(f"PTY write failed: {e}")
                                 line_buf = ""
                             else:
-                                _log(f"prompt + no sideband — killing: {prompt_text!r}")
+                                if sb_err:
+                                    sideband_error = sb_err
+                                    _log(f"sideband 불가 ({sb_err}) — killing: {prompt_text!r}")
+                                else:
+                                    _log(f"사용자 취소 — killing: {prompt_text!r}")
                                 _kill_tree(pid)
                                 killed = True
                                 line_buf = ""
@@ -458,7 +480,7 @@ def shell_run(
                 prompt_text = f"[inactivity {inactivity_sec}s] {hint}"
                 prompts_seen.append(prompt_text)
                 _log(f"inactivity fallback fired — hint: {hint!r}")
-                value = _request_sideband_input(
+                value, sb_err = _request_sideband_input(
                     prompt_text, cmd,
                     {"cwd": work_cwd, "exec": "shell_run", "reason": f"inactivity {inactivity_sec}s"},
                 )
@@ -471,7 +493,11 @@ def shell_run(
                     last_output_time = time.time()  # reset
                     line_buf = ""
                 else:
-                    _log("inactivity popup cancelled — killing")
+                    if sb_err:
+                        sideband_error = sb_err
+                        _log(f"inactivity popup 불가 ({sb_err}) — killing")
+                    else:
+                        _log("inactivity popup 취소 — killing")
                     _kill_tree(pid)
                     killed = True
                 if killed:
@@ -535,13 +561,18 @@ def shell_run(
             "exit_code": exit_code if exit_code is not None else -1,
         })
 
-    return {
+    result = {
         "exit_code": exit_code,
         "tail_log": tail,
         "prompts_seen": prompts_seen,
         "duration_sec": round(time.time() - start, 2),
         "killed_for_prompt": killed and bool(prompts_seen),
     }
+    if sideband_error:
+        # popup 을 띄우지 못해 중단된 경우 — 명령 자체의 실패가 아니라 mdwiz 환경
+        # 문제임을 AI 가 사용자에게 그대로 전달할 수 있도록 별도 필드로 반환.
+        result["sideband_error"] = sideband_error
+    return result
 
 
 # ---------------------------------------------------------------------------

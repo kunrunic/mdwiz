@@ -53,7 +53,16 @@ def log(msg: str) -> None:
 
 
 def show_popup(session: str, req: dict) -> dict:
-    """Pop wizard-pwprompt.sh over the tmux session, return {value, cancelled?}."""
+    """Pop mdwiz-pwprompt over the tmux session.
+
+    반환:
+      {"value": "<입력값>", "cancelled": False}          — 정상 입력
+      {"value": "", "cancelled": True}                   — 사용자가 Ctrl+C 로 취소
+      {"value": "", "cancelled": False, "error": "..."}  — popup 자체가 뜨지 못함
+                                                           (tmux 부재 / 3.2 미만 등)
+    호출자(mdwiz-mcp)는 error 가 있으면 빈 값을 stdin 에 주입하지 않고 명령을 중단한다.
+    빈 값 주입은 사용자에게 "인증 실패" 로만 보여 원인 추적이 불가능해지기 때문.
+    """
     meta_fd, meta_path = tempfile.mkstemp(suffix=".json", prefix="mdwiz-meta-")
     res_fd, res_path = tempfile.mkstemp(suffix=".txt", prefix="mdwiz-res-")
     os.close(meta_fd)
@@ -70,27 +79,48 @@ def show_popup(session: str, req: dict) -> dict:
             )
 
         # 같은 python 으로 popup 도 실행 (helper 가 쓰는 Python = sys.executable)
-        result = subprocess.run(
-            [
-                "tmux", "display-popup",
-                "-t", session,
-                "-E",
-                "-w", "70",
-                "-h", "12",
-                "-T", " mdwiz 입력 요청 ",
-                sys.executable, str(PWPROMPT), meta_path, res_path,
-            ],
-            check=False,
-        )
-        cancelled = result.returncode == 130
+        base = ["tmux", "display-popup", "-t", session, "-E", "-w", "70", "-h", "12"]
+        tail = [sys.executable, str(PWPROMPT), meta_path, res_path]
+
+        def _run(argv: list[str]) -> subprocess.CompletedProcess:
+            return subprocess.run(argv, check=False, stderr=subprocess.PIPE)
+
+        try:
+            result = _run(base + ["-T", " mdwiz 입력 요청 "] + tail)
+        except FileNotFoundError:
+            return {"value": "", "cancelled": False,
+                    "error": "tmux 실행 파일 없음 (PATH 확인)"}
+        err = (result.stderr or b"").decode(errors="replace").strip()
+
+        # -T (팝업 제목) 는 tmux 3.3+ 에서만 유효 — 문법 거부면 제목 없이 재시도.
+        if result.returncode not in (0, 130) and ("usage:" in err or "unknown" in err):
+            log(f"display-popup -T rejected ({err!r}) — retrying without -T")
+            try:
+                result = _run(base + tail)
+            except FileNotFoundError:
+                return {"value": "", "cancelled": False,
+                        "error": "tmux 실행 파일 없음 (PATH 확인)"}
+            err = (result.stderr or b"").decode(errors="replace").strip()
+
+        # mdwiz-pwprompt 는 성공 0 / 취소 130 만 반환한다. 그 외 코드는 popup 을
+        # 띄우지 못한 것 (tmux 에 display-popup 이 없는 3.2 미만 등).
+        if result.returncode == 130:
+            return {"value": "", "cancelled": True}
+
+        if result.returncode != 0:
+            detail = err or f"tmux display-popup exit={result.returncode}"
+            log(f"popup failed: {detail}")
+            return {"value": "", "cancelled": False,
+                    "error": f"popup 실패 — {detail} (tmux 3.2 이상 필요)"}
 
         try:
             with open(res_path, "r") as f:
                 value = f.read()
-        except Exception:
-            value = ""
+        except Exception as e:
+            return {"value": "", "cancelled": False,
+                    "error": f"popup 결과 파일 읽기 실패: {e}"}
 
-        return {"value": value, "cancelled": cancelled}
+        return {"value": value, "cancelled": False}
     finally:
         for p in (meta_path, res_path):
             try:
@@ -204,7 +234,13 @@ def handle_client(conn: socket.socket, session: str) -> None:
         log(f"prompt_request from cmd={req.get('cmd','?')[:40]!r}")
         resp = show_popup(session, req)
         conn.sendall(json.dumps(resp).encode() + b"\n")
-        log(f"responded ({'cancelled' if resp['cancelled'] else 'ok'})")
+        if resp.get("error"):
+            state = f"error: {resp['error']}"
+        elif resp.get("cancelled"):
+            state = "cancelled"
+        else:
+            state = "ok"
+        log(f"responded ({state})")
     except Exception as e:
         log(f"handler error: {e}")
         try:
